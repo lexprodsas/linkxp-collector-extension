@@ -2,57 +2,236 @@ const getProfileBtn = document.getElementById('getProfileBtn');
 const getPublicationsBtn = document.getElementById('getPublicationsBtn');
 const addPublicationForm = document.getElementById('addPublicationForm');
 const statsList = document.getElementById('statsList');
+const linkAccountBtn = document.getElementById('linkAccountBtn');
+const syncApiBtn = document.getElementById('syncApiBtn');
+const authStatus = document.getElementById('authStatus');
 
-document.addEventListener('DOMContentLoaded', async () => {
-    await loadStoredStats();
-    setupEventListeners();
-});
+async function sendMessageToBackground(action, data = {}) {
+    return new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage({ action, ...data }, (response) => {
+            if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+            } else if (response && response.success) {
+                resolve(response.data);
+            } else {
+                reject(new Error(response?.error || 'Erreur inconnue'));
+            }
+        });
+    });
+}
+
+async function linkAccount() {
+    try {
+        const result = await sendMessageToBackground('checkAuthStatus');
+        const isLinked = result.isLinked;
+
+        if (isLinked) {
+            // Délier le compte
+            const confirmed = confirm('Êtes-vous sûr de vouloir délier ce compte ?');
+            if (confirmed) {
+                await sendMessageToBackground('clearTokens');
+                showNotification('Compte délié', 'success');
+                await updateAuthStatus();
+            }
+            return;
+        }
+
+        // Processus de liaison
+        setButtonLoading(linkAccountBtn, true);
+        showNotification('Initialisation de la liaison...', 'info');
+
+        // Étape 1: Demander un device link token
+        const deviceData = await sendMessageToBackground('initDeviceLinking');
+
+        showNotification('Ouverture de la page de validation...', 'info');
+
+        // Étape 2: Ouvrir la page de validation
+        const validationUrl = sendMessageToBackground.getWebUrl(deviceData.validation_url);
+        await sendMessageToBackground.openValidationPage(validationUrl);
+
+        showNotification('Vérification de la liaison...', 'info');
+
+        // Étape 3: Confirmer la liaison (attendre un peu)
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        const tokens = await sendMessageToBackground.confirmDeviceLinking(deviceData.link_token);
+
+        showNotification('Compte lié avec succès !', 'success');
+        await updateAuthStatus();
+
+    } catch (error) {
+        console.error('Erreur liaison compte:', error);
+
+        if (error.message.includes('EXPIRED')) {
+            showNotification('Le lien a expiré. Veuillez réessayer.', 'error');
+        } else {
+            showNotification('Erreur: ' + error.message, 'error');
+        }
+    } finally {
+        setButtonLoading(linkAccountBtn, false);
+    }
+}
+
+async function syncProfileToAPI(accessToken, profileData) {
+    const payload = {
+        followers: profileData.followers || 0,
+        skills: profileData.skills || [],
+        collectedAt: profileData.timestamp || new Date().toISOString()
+    };
+
+    const response = await fetch(sendMessageToBackground.getFullUrl('/linkedin/profile'), {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.message || `Erreur ${response.status}`);
+    }
+}
+
+async function syncPublicationsToAPI(accessToken, publications) {
+    // Formater les publications pour l'API
+    const formattedPublications = publications.map(pub => ({
+        urn: pub.urn,
+        text: pub.text || '',
+        author: pub.author || '',
+        isRepost: pub.isRepost || false,
+        type: pub.type || (pub.isRepost ? 'repost' : 'original'),
+        publishedDate: pub.publishedDate || pub.timestamp || new Date().toISOString(),
+        rawDateText: pub.rawDateText || '',
+        collectedAt: pub.collectedAt || pub.timestamp || new Date().toISOString(),
+        stats: {
+            reactions: pub.stats?.reactions || 0,
+            comments: pub.stats?.comments || 0,
+            reposts: pub.stats?.reposts || 0
+        }
+    }));
+
+    const response = await fetch(sendMessageToBackground.getFullUrl('/linkedin/publications'), {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(formattedPublications)
+    });
+
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.message || `Erreur ${response.status}`);
+    }
+}
+
+function chunkArray(array, chunkSize) {
+    const chunks = [];
+    for (let i = 0; i < array.length; i += chunkSize) {
+        chunks.push(array.slice(i, i + chunkSize));
+    }
+    return chunks;
+}
+
+async function syncToAPI() {
+    try {
+        setButtonLoading(syncApiBtn, true);
+
+        // Vérifier l'authentification
+        const accessToken = await sendMessageToBackground.getValidAccessToken();
+
+        showNotification('Synchronisation en cours...', 'info');
+
+        // Récupérer les données locales
+        const data = await chrome.storage.local.get(['profile', 'publications']);
+
+        let syncCount = 0;
+
+        // Synchroniser le profil
+        if (data.profile) {
+            await syncProfileToAPI(accessToken, data.profile);
+            syncCount++;
+        }
+
+        // Synchroniser les publications (par batch de 20)
+        if (data.publications && data.publications.length > 0) {
+            const batches = chunkArray(data.publications, 20);
+
+            for (const batch of batches) {
+                await syncPublicationsToAPI(accessToken, batch);
+                syncCount++;
+
+                // Pause entre les batches pour respecter le rate limiting
+                if (batches.length > 1) {
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+            }
+        }
+
+        showNotification(`Synchronisation réussie ! (${syncCount} requêtes)`, 'success');
+
+    } catch (error) {
+        console.error('Erreur sync API:', error);
+
+        if (error.message === 'DEVICE_LINKING_REQUIRED') {
+            showNotification('Liaison requise. Veuillez lier votre compte.', 'error');
+            await updateAuthStatus();
+        } else if (error.message.includes('429')) {
+            showNotification('Limite de débit atteinte. Réessayez dans 1 minute.', 'warning');
+        } else {
+            showNotification('Erreur sync: ' + error.message, 'error');
+        }
+    } finally {
+        setButtonLoading(syncApiBtn, false);
+    }
+}
 
 function setupEventListeners() {
     getProfileBtn.addEventListener('click', collectProfileStats);
     getPublicationsBtn.addEventListener('click', collectPublications);
     addPublicationForm.addEventListener('submit', addPublicationManually);
 
-    const debugBtn = document.getElementById('debugBtn');
-    if (debugBtn) {
-        debugBtn.addEventListener('click', debugViaBackground);
-    }
+    linkAccountBtn.addEventListener('click', linkAccount);
+    syncApiBtn.addEventListener('click', syncToAPI);
 }
 
-async function debugViaBackground() {
+async function updateAuthStatus() {
     try {
-        showNotification('Debug en cours...', 'info');
+        const result = await sendMessageToBackground('checkAuthStatus');
+        const isLinked = result.isLinked;
 
-        // Envoyer message au background script
-        const response = await chrome.runtime.sendMessage({ action: 'debugStorage' });
+        console.log('🔍 Debug popup authStatus:', {
+            result,
+            isLinked,
+            typeof_isLinked: typeof isLinked
+        });
 
-        if (response && response.success) {
-            showNotification('Debug terminé ! Vérifiez la console du background.js', 'success');
-
-            // Afficher aussi dans la popup
-            const debugOutput = document.getElementById('debugOutput');
-            if (debugOutput) {
-                let output = '<strong>✅ Debug réussi !</strong><br>';
-                output += '<strong>Vérifiez la console de background.js pour les détails complets</strong><br><br>';
-
-                const data = response.data;
-                output += `<strong>Résumé :</strong><br>`;
-                output += `• Éléments dans le storage: ${Object.keys(data).length}<br>`;
-                output += `• Profil: ${data.profile ? '✅' : '❌'}<br>`;
-                output += `• Publications: ${data.publications ? `✅ (${data.publications.length})` : '❌'}<br>`;
-
-                debugOutput.innerHTML = output;
-                debugOutput.style.display = 'block';
-            }
+        if (isLinked) {
+            authStatus.innerHTML = '🟢 Compte lié';
+            authStatus.className = 'auth-status linked';
+            linkAccountBtn.textContent = 'Délier le compte';
+            linkAccountBtn.className = 'btn btn-secondary';
+            syncApiBtn.disabled = false;
         } else {
-            showNotification('Erreur debug', 'error');
+            authStatus.innerHTML = '🔴 Compte non lié';
+            authStatus.className = 'auth-status not-linked';
+            linkAccountBtn.textContent = 'Lier au compte LinkXP';
+            linkAccountBtn.className = 'btn btn-primary';
+            syncApiBtn.disabled = true;
         }
-
     } catch (error) {
-        console.error('Erreur debug:', error);
-        showNotification('Erreur: ' + error.message, 'error');
+        authStatus.innerHTML = '⚠️ Erreur';
     }
 }
+
+document.addEventListener('DOMContentLoaded', async () => {
+    await loadStoredStats();
+    await updateAuthStatus();
+    setupEventListeners();
+});
+
 
 // ========================================
 // 2. COLLECTE PROFIL (ABONNÉS + COMPÉTENCES)
@@ -558,8 +737,6 @@ function scrapePublicationsData() {
         return [];
     }
 }
-
-
 
 function checkActivityPageLoaded() {
     try {

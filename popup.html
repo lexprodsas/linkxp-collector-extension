@@ -1,46 +1,68 @@
 <!DOCTYPE html>
-<html lang="fr">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <title>LinkXP - LinkedIn Stats</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="utf-8">
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <!-- Logo -->
-    <div class="header">
-        <div class="logo">LXP</div>
-        <h1>LinkXP - LinkedIn Stats</h1>
-    </div>
-
-    <!-- Actions principales -->
-    <div class="actions-container">
-        <button id="getProfileBtn" type="button" class="btn btn-primary">
-            📊 Récupérer mon profil
-        </button>
-        <button id="getPublicationsBtn" type="button" class="btn btn-secondary">
-            📝 Récupérer mes publications
-        </button>
-    </div>
-
-    <!-- Ajout manuel de publication -->
-    <div class="form-section">
-        <h2>Ajouter une publication</h2>
-        <form id="addPublicationForm" class="form-inline">
-            <input type="url" id="publicationUrl" placeholder="URL LinkedIn de la publication" class="form-control"
-                   required>
-            <button type="submit" class="btn btn-small">+</button>
-        </form>
-    </div>
-
-    <!-- Historique -->
-    <div class="stats-section">
-        <h2>Données collectées</h2>
-        <div id="statsList" class="stats-list">
-            <div class="empty-state">Aucune donnée collectée</div>
+    <div class="container">
+        <div class="header">
+            <img src="icons/icon48.png" alt="LinkXP" class="logo">
+            <h1>LinkXP Stats</h1>
         </div>
+
+        <!-- Section Authentification API -->
+        <div class="section">
+            <h3>🔗 Liaison Compte LinkXP</h3>
+            <div id="authStatus" class="auth-status not-linked">🔴 Compte non lié</div>
+
+            <div class="button-group">
+                <button id="linkAccountBtn" class="btn btn-primary">
+                    Lier au compte LinkXP
+                </button>
+                <button id="syncApiBtn" class="btn btn-success" disabled>
+                    📤 Synchroniser avec API
+                </button>
+            </div>
+        </div>
+
+        <!-- Section Collecte -->
+        <div class="section">
+            <h3>📊 Collecte de données</h3>
+            <div class="button-group">
+                <button id="getProfileBtn" class="btn btn-primary">
+                    👤 Collecter Profil
+                </button>
+                <button id="getPublicationsBtn" class="btn btn-primary">
+                    📝 Collecter Publications
+                </button>
+            </div>
+        </div>
+
+        <!-- Section Ajout Manuel -->
+        <div class="section">
+            <h3>➕ Ajout Manuel</h3>
+            <form id="addPublicationForm">
+                <input type="text" id="pubUrn" placeholder="URN de la publication" required>
+                <button type="submit" class="btn btn-secondary">Ajouter</button>
+            </form>
+        </div>
+
+        <!-- Section Statistiques -->
+        <div class="section">
+            <h3>📈 Statistiques</h3>
+            <div id="statsList"></div>
+        </div>
+
+        <!-- Section Debug -->
+        <div class="section">
+            <button id="debugBtn" class="btn btn-outline">🐛 Debug Storage</button>
+        </div>
+
+        <div id="notification" class="notification hidden"></div>
     </div>
 
+    <!-- IMPORTANT: Importer api-auth.js AVANT popup.js -->
     <script src="popup.js"></script>
 </body>
 </html>
