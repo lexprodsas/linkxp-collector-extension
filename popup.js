@@ -1,32 +1,66 @@
-// popup.js - Gestion de l'interface popup de l'extension
-
-console.log('LinkXP Popup loaded');
-
-// Références aux éléments DOM
 const getProfileBtn = document.getElementById('getProfileBtn');
 const getPublicationsBtn = document.getElementById('getPublicationsBtn');
 const addPublicationForm = document.getElementById('addPublicationForm');
-const publicationUrlInput = document.getElementById('publicationUrl');
 const statsList = document.getElementById('statsList');
 
-// Initialisation au chargement
-document.addEventListener('DOMContentLoaded', () => {
-    loadStoredStats();
+document.addEventListener('DOMContentLoaded', async () => {
+    await loadStoredStats();
     setupEventListeners();
 });
 
-// Configuration des écouteurs d'événements
 function setupEventListeners() {
     getProfileBtn.addEventListener('click', collectProfileStats);
     getPublicationsBtn.addEventListener('click', collectPublications);
     addPublicationForm.addEventListener('submit', addPublicationManually);
+
+    const debugBtn = document.getElementById('debugBtn');
+    if (debugBtn) {
+        debugBtn.addEventListener('click', debugViaBackground);
+    }
 }
 
-// Collecte des statistiques du profil
+async function debugViaBackground() {
+    try {
+        showNotification('Debug en cours...', 'info');
+
+        // Envoyer message au background script
+        const response = await chrome.runtime.sendMessage({ action: 'debugStorage' });
+
+        if (response && response.success) {
+            showNotification('Debug terminé ! Vérifiez la console du background.js', 'success');
+
+            // Afficher aussi dans la popup
+            const debugOutput = document.getElementById('debugOutput');
+            if (debugOutput) {
+                let output = '<strong>✅ Debug réussi !</strong><br>';
+                output += '<strong>Vérifiez la console de background.js pour les détails complets</strong><br><br>';
+
+                const data = response.data;
+                output += `<strong>Résumé :</strong><br>`;
+                output += `• Éléments dans le storage: ${Object.keys(data).length}<br>`;
+                output += `• Profil: ${data.profile ? '✅' : '❌'}<br>`;
+                output += `• Publications: ${data.publications ? `✅ (${data.publications.length})` : '❌'}<br>`;
+
+                debugOutput.innerHTML = output;
+                debugOutput.style.display = 'block';
+            }
+        } else {
+            showNotification('Erreur debug', 'error');
+        }
+
+    } catch (error) {
+        console.error('Erreur debug:', error);
+        showNotification('Erreur: ' + error.message, 'error');
+    }
+}
+
+// ========================================
+// 2. COLLECTE PROFIL (ABONNÉS + COMPÉTENCES)
+// ========================================
+
 async function collectProfileStats() {
     try {
         setButtonLoading(getProfileBtn, true);
-
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
         if (!tab.url.includes('linkedin.com')) {
@@ -34,12 +68,9 @@ async function collectProfileStats() {
             return;
         }
 
-        // Vérifier si on est sur la page des compétences ou le profil principal
         if (tab.url.includes('/details/skills/')) {
-            // On est sur la page des compétences : collecter uniquement les compétences
             await collectSkillsOnly(tab.id);
         } else if (tab.url.includes('/in/')) {
-            // On est sur le profil principal : collecter abonnés + proposer compétences
             await collectProfileAndSkills(tab.id);
         } else {
             showNotification('Veuillez aller sur votre profil LinkedIn', 'error');
@@ -53,140 +84,66 @@ async function collectProfileStats() {
     }
 }
 
-function scrapeProfileDataMain() {
-    const data = {
-        timestamp: new Date().toISOString(),
-        type: 'profile',
-        followers: 0,
-        skills: [] // Sera rempli plus tard depuis la page des compétences
-    };
-
-    try {
-        // Collecte des abonnés avec ton sélecteur
-        const followersElement = document.querySelector('.ember-view.link-without-visited-state .t-bold');
-        if (followersElement) {
-            const text = followersElement.textContent.trim();
-            console.log('Texte trouvé pour followers:', text);
-
-            let match = text.match(/(\d[\d\s,\.]*)\s*abonné/i) ||
-                text.match(/(\d[\d\s,\.]*)\s*follower/i) ||
-                text.match(/(\d[\d\s,\.]*)\s*connexion/i) ||
-                text.match(/(\d[\d\s,\.]*)/);
-
-            if (match) {
-                const cleanNumber = match[1].replace(/[\s,\.]/g, '');
-                data.followers = parseInt(cleanNumber) || 0;
-                console.log('Nombre d\'abonnés trouvé:', data.followers);
-            }
-        } else {
-            console.log('Élément followers non trouvé');
-
-            // Sélecteurs alternatifs
-            const alternativeSelectors = [
-                '.pv-text-details__left-panel .t-bold',
-                '.text-body-medium.t-bold',
-                '.pv-top-card--experience-list-item .t-bold'
-            ];
-
-            for (const selector of alternativeSelectors) {
-                const element = document.querySelector(selector);
-                if (element && (element.textContent.includes('abonné') || element.textContent.includes('connexion'))) {
-                    const text = element.textContent.trim();
-                    const match = text.match(/(\d[\d\s,\.]*)/);
-                    if (match) {
-                        const cleanNumber = match[1].replace(/[\s,\.]/g, '');
-                        data.followers = parseInt(cleanNumber) || 0;
-                        console.log(`Followers trouvé avec ${selector}:`, data.followers);
-                        break;
-                    }
-                }
-            }
-        }
-
-        console.log('Données profil collectées:', data);
-        return data;
-
-    } catch (error) {
-        console.error('Erreur scraping profil principal:', error);
-        return null;
-    }
-}
-
 async function collectProfileAndSkills(tabId) {
-    try {
-        const results = await chrome.scripting.executeScript({
-            target: { tabId },
-            func: scrapeProfileDataMain
-        });
+    const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: scrapeProfileData
+    });
 
-        const profileData = results[0].result;
+    const profileData = results[0].result;
+    if (!profileData) {
+        showNotification('Erreur lors de la collecte du profil', 'error');
+        return;
+    }
 
-        if (profileData) {
-            await saveToStorage('profile', profileData);
-            showNotification('Profil collecté ! Ouverture de la page compétences...', 'success');
-            await loadStoredStats();
+    await saveToStorage('profile', profileData);
+    showNotification('Profil collecté ! Ouverture de la page compétences...', 'success');
+    await loadStoredStats();
 
-            await chrome.storage.local.set({ autoCollectSkills: true });
+    // Ouvrir page compétences avec auto-collecte
+    await chrome.storage.local.set({ autoCollectSkills: true });
+    const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const profileMatch = currentTab.url.match(/linkedin\.com\/in\/([^\/]+)/);
 
-            // Ouvrir la page des compétences
-            const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-            const profileMatch = currentTab.url.match(/linkedin\.com\/in\/([^\/]+)/);
-
-            if (profileMatch) {
-                const skillsUrl = `https://www.linkedin.com/in/${profileMatch[1]}/details/skills/`;
-
-                await chrome.tabs.create({ url: skillsUrl });
-
-                showNotification('Page des compétences ouverte ! Collecte automatique en cours...', 'info');
-            }
-        } else {
-            showNotification('Erreur lors de la collecte du profil', 'error');
-        }
-
-    } catch (error) {
-        console.error('Erreur collecte profil principal:', error);
-        showNotification('Erreur lors de la collecte', 'error');
+    if (profileMatch) {
+        const skillsUrl = `https://www.linkedin.com/in/${profileMatch[1]}/details/skills/`;
+        await chrome.tabs.create({ url: skillsUrl });
+        showNotification('Page des compétences ouverte ! Collecte automatique en cours...', 'info');
     }
 }
 
 async function collectSkillsOnly(tabId) {
-    try {
-        const results = await chrome.scripting.executeScript({
-            target: { tabId },
-            func: scrapeSkillsFromPage
-        });
+    const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: scrapeSkillsData
+    });
 
-        const skills = results[0].result || [];
-
-        if (skills.length > 0) {
-            // Récupérer les données existantes du profil
-            const existingData = await chrome.storage.local.get('profile');
-
-            const profileData = {
-                ...existingData.profile,
-                timestamp: new Date().toISOString(),
-                type: 'profile',
-                skills: skills
-            };
-
-            await saveToStorage('profile', profileData);
-            showNotification(`${skills.length} compétences collectées !`, 'success');
-            loadStoredStats();
-        } else {
-            showNotification('Aucune compétence trouvée sur cette page', 'warning');
-        }
-
-    } catch (error) {
-        console.error('Erreur collecte compétences:', error);
-        showNotification('Erreur lors de la collecte des compétences', 'error');
+    const skills = results[0].result || [];
+    if (skills.length === 0) {
+        showNotification('Aucune compétence trouvée sur cette page', 'warning');
+        return;
     }
+
+    const existingData = await chrome.storage.local.get('profile');
+    const profileData = {
+        ...existingData.profile,
+        timestamp: new Date().toISOString(),
+        type: 'profile',
+        skills: skills
+    };
+
+    await saveToStorage('profile', profileData);
+    showNotification(`${skills.length} compétences collectées !`, 'success');
+    await loadStoredStats();
 }
 
-// Collecte des publications récentes
+// ========================================
+// 3. COLLECTE PUBLICATIONS
+// ========================================
+
 async function collectPublications() {
     try {
         setButtonLoading(getPublicationsBtn, true);
-
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
         if (!tab.url.includes('linkedin.com')) {
@@ -194,19 +151,12 @@ async function collectPublications() {
             return;
         }
 
-        const results = await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            func: scrapePublications
-        });
+        const isOnActivityPage = tab.url.includes('/recent-activity/all/');
 
-        const publications = results[0].result;
-
-        if (publications && publications.length > 0) {
-            await saveToStorage('publications', publications);
-            showNotification(`${publications.length} publications collectées !`, 'success');
-            loadStoredStats();
+        if (isOnActivityPage) {
+            await performPublicationsCollection(tab.id);
         } else {
-            showNotification('Aucune publication trouvée', 'warning');
+            await redirectToActivityPageAndCollect(tab);
         }
 
     } catch (error) {
@@ -217,148 +167,389 @@ async function collectPublications() {
     }
 }
 
-// Ajout manuel d'une publication à suivre
-async function addPublicationManually(e) {
-    e.preventDefault();
+async function redirectToActivityPageAndCollect(tab) {
+    const profileMatch = tab.url.match(/linkedin\.com\/in\/([^\/\?]+)/);
+    if (!profileMatch) {
+        try {
+            const results = await chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                func: () => {
+                    const profilePictureLink = document.querySelector('a.profile-card-profile-picture-container');
+                    if (profilePictureLink && profilePictureLink.href) {
+                        const match = profilePictureLink.href.match(/linkedin\.com\/in\/([^\/\?]+)/);
+                        if (match) {
+                            return match[1];
+                        }
+                    }
+                }
+            });
 
-    const url = publicationUrlInput.value.trim();
+            const profileURI = results[0].result;
 
-    if (!url.includes('linkedin.com')) {
-        showNotification('URL LinkedIn invalide', 'error');
+            if (profileURI) {
+                const targetUrl = `https://www.linkedin.com/in/${profileURI}/recent-activity/all/`;
+                showNotification('Profil détecté ! Redirection vers les publications...', 'info');
+
+                await chrome.tabs.update(tab.id, { url: targetUrl });
+                await waitForPageLoadThenCollect(tab.id);
+                return;
+            }
+
+        } catch (error) {
+            console.error('Erreur extraction profil DOM:', error);
+        }
+    }
+
+    const targetUrl = `https://www.linkedin.com/in/${profileMatch[1]}/recent-activity/all/`;
+    showNotification('Redirection vers la page des publications...', 'info');
+
+    await chrome.tabs.update(tab.id, { url: targetUrl });
+    await waitForPageLoadThenCollect(tab.id);
+}
+
+async function waitForPageLoadThenCollect(tabId) {
+    let attempts = 0;
+    const maxAttempts = 20;
+
+    const checkPageAndCollect = async () => {
+        attempts++;
+
+        try {
+            const results = await chrome.scripting.executeScript({
+                target: { tabId },
+                func: checkActivityPageLoaded
+            });
+
+            const isLoaded = results[0].result.isLoaded;
+
+            if (isLoaded) {
+                showNotification('Page chargée ! Collecte des publications...', 'success');
+                await performPublicationsCollection(tabId);
+                return;
+            }
+
+            if (attempts < maxAttempts) {
+                showNotification(`Chargement... (${attempts}/${maxAttempts})`, 'info');
+                setTimeout(checkPageAndCollect, 2000);
+            } else {
+                showNotification('Délai dépassé. Tentative de collecte...', 'warning');
+                await performPublicationsCollection(tabId);
+            }
+
+        } catch (error) {
+            if (attempts < maxAttempts) {
+                setTimeout(checkPageAndCollect, 2000);
+            } else {
+                showNotification('Erreur de chargement', 'error');
+            }
+        }
+    };
+
+    setTimeout(checkPageAndCollect, 1000);
+}
+
+async function performPublicationsCollection(tabId) {
+    const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: scrapePublicationsData
+    });
+
+    const publications = results[0].result;
+    if (!publications || publications.length === 0) {
+        showNotification('Aucune publication trouvée', 'warning');
         return;
     }
 
+    await saveToStorage('publications', publications);
+
+    const originalPosts = publications.filter(p => !p.isRepost).length;
+    const reposts = publications.filter(p => p.isRepost).length;
+
+    showNotification(`${publications.length} publications collectées (${originalPosts} originales, ${reposts} partages)`, 'success');
+    await loadStoredStats();
+}
+
+// ========================================
+// 4. FONCTIONS DE SCRAPING (EXÉCUTÉES SUR LA PAGE)
+// ========================================
+
+function scrapeProfileData() {
+    const data = {
+        timestamp: new Date().toISOString(),
+        type: 'profile',
+        followers: 0,
+        skills: []
+    };
+
     try {
-        // Ouvrir l'URL et collecter les stats
-        const newTab = await chrome.tabs.create({ url, active: false });
+        const followersElement = document.querySelector('.ember-view.link-without-visited-state .t-bold');
+        if (followersElement) {
+            const text = followersElement.textContent.trim();
+            const match = text.match(/(\d[\d\s,\.]*)\s*abonné/i) ||
+                text.match(/(\d[\d\s,\.]*)\s*follower/i) ||
+                text.match(/(\d[\d\s,\.]*)\s*connexion/i) ||
+                text.match(/(\d[\d\s,\.]*)/);
 
-        // Attendre le chargement
-        await new Promise(resolve => setTimeout(resolve, 3000));
-
-        const results = await chrome.scripting.executeScript({
-            target: { tabId: newTab.id },
-            func: scrapePostStats
-        });
-
-        const postData = results[0].result;
-
-        if (postData) {
-            await saveToStorage('trackedPosts', postData, true);
-            showNotification('Publication ajoutée au suivi !', 'success');
-            loadStoredStats();
-            publicationUrlInput.value = '';
-            chrome.tabs.remove(newTab.id);
+            if (match) {
+                data.followers = parseInt(match[1].replace(/[\s,\.]/g, '')) || 0;
+            }
         }
 
+        return data;
     } catch (error) {
-        console.error('Erreur ajout publication:', error);
-        showNotification('Erreur: ' + error.message, 'error');
+        console.error('Erreur scraping profil:', error);
+        return null;
     }
 }
 
-function scrapeSkillsFromPage() {
+function scrapeSkillsData() {
     const skills = [];
 
     try {
-        console.log('Scraping détaillé des compétences...');
-
-        // Utiliser ton sélecteur spécifique
         const skillElements = document.querySelectorAll('[data-field="skill_page_skill_topic"]');
 
-        console.log(`${skillElements.length} compétences trouvées avec [data-field="skill_page_skill_topic"]`);
+        skillElements.forEach((skillElement) => {
+            const firstSpan = skillElement.querySelector('span:first-child') || skillElement.querySelector('span');
+            const skillName = firstSpan ? firstSpan.textContent.trim() : skillElement.textContent.trim();
 
-        skillElements.forEach((skillElement, index) => {
-            try {
-                // Nom de la compétence
-                const firstSpan = skillElement.querySelector('span:first-child') ||
-                    skillElement.querySelector('span:first-of-type') ||
-                    skillElement.querySelector('span');
-                const skillName = firstSpan ? firstSpan.textContent.trim() : skillElement.textContent.trim();
+            if (!skillName || skillName.length < 1) return;
 
-                if (!skillName || skillName.length < 1) {
-                    return; // Ignorer les compétences vides
+            const parentElement = skillElement.closest('.pvs-list__item--line-separated') ||
+                skillElement.closest('.pvs-entity') ||
+                skillElement.closest('.artdeco-list__item');
+
+            let experienceCount = 0;
+            if (parentElement) {
+                const subComponents = parentElement.querySelector('.pvs-entity__sub-components');
+                if (subComponents) {
+                    experienceCount = subComponents.querySelectorAll('li').length;
                 }
-
-                // Remonter au parent pour trouver les expériences
-                let parentElement = skillElement.closest('.pvs-list__item--line-separated') ||
-                    skillElement.closest('.pvs-entity') ||
-                    skillElement.closest('.artdeco-list__item');
-
-                let experienceCount = 0;
-
-                if (parentElement) {
-                    // Chercher .pvs-entity__sub-components li
-                    const subComponents = parentElement.querySelector('.pvs-entity__sub-components');
-
-                    if (subComponents) {
-                        const experienceItems = subComponents.querySelectorAll('li');
-                        experienceCount = experienceItems.length;
-                        console.log(`Compétence "${skillName}": ${experienceCount} expériences`);
-                    }
-                }
-
-                // Ajouter la compétence avec ses détails
-                const skillData = {
-                    name: skillName,
-                    experienceCount: experienceCount,
-                    hasExperiences: experienceCount > 0
-                };
-
-                skills.push(skillData);
-                console.log(`Compétence ajoutée:`, skillData);
-
-            } catch (error) {
-                console.error(`Erreur lors du traitement de la compétence ${index}:`, error);
             }
+
+            skills.push({
+                name: skillName,
+                experienceCount: experienceCount,
+                hasExperiences: experienceCount > 0
+            });
         });
 
-        // Fallback si aucune compétence trouvée
-        if (skills.length === 0) {
-            console.log('Fallback vers sélecteurs alternatifs...');
-
-            const fallbackElements = document.querySelectorAll('.artdeco-list__item .mr1.t-bold span');
-
-            fallbackElements.forEach(element => {
-                const skillName = element.textContent.trim();
-                if (skillName && skillName.length > 1 && skillName.length < 100) {
-                    skills.push({
-                        name: skillName,
-                        experienceCount: 0,
-                        hasExperiences: false
-                    });
-                }
-            });
-        }
-
-        console.log('Compétences finales collectées:', skills);
         return skills;
-
     } catch (error) {
         console.error('Erreur scraping compétences:', error);
         return [];
     }
 }
 
-// Scraping des publications
-function scrapePublications() {
+function scrapePublicationsData() {
     const publications = [];
 
     try {
         const postElements = document.querySelectorAll('.feed-shared-update-v2');
 
         postElements.forEach((post, index) => {
-            if (index >= 10) return; // Limiter à 10 publications
+            if (index >= 20) return;
 
-            const postLink = post.querySelector('a[href*="/posts/"]');
-            const postText = post.querySelector('.feed-shared-update-v2__description')?.textContent.trim();
-
-            if (postLink) {
-                publications.push({
-                    url: postLink.href,
-                    text: postText?.substring(0, 100) + '...' || 'Sans texte',
-                    timestamp: new Date().toISOString()
-                });
+            const dataUrn = post.getAttribute('data-urn');
+            if (!dataUrn) {
+                return; // Ignorer si pas d'URN
             }
+
+            // Détection republication avec nouveau sélecteur
+            const headerElement = post.querySelector('.update-components-header');
+            let isRepost = false;
+
+            if (headerElement) {
+                const headerText = headerElement.textContent.trim();
+                isRepost = headerText.includes('a republié ceci') ||
+                    headerText.includes('has reposted this') ||
+                    headerText.includes('reposted this');
+
+            }
+
+            // Date de publication avec sélecteur spécifique
+            const dateElement = post.querySelector('.update-components-actor__container .update-components-actor__meta .update-components-actor__sub-description > span:first-child');
+            let publicationDate = new Date().toISOString();
+            let rawDateText = '';
+
+            if (dateElement) {
+                rawDateText = dateElement.textContent.trim();
+
+                // Nettoyer le texte (supprimer les "•", "Modifié", etc.)
+                const cleanText = rawDateText.replace(/•.*$/, '').trim(); // Tout supprimer après le premier •
+                const now = new Date();
+                // Patterns de reconnaissance
+                if (cleanText.match(/^\d+\s*min?\.?$/)) {
+                    // "5 min", "30 min."
+                    const minutes = parseInt(cleanText.match(/\d+/)[0]);
+                    const date = new Date(now.getTime() - (minutes * 60 * 1000));
+                    publicationDate = date.toISOString();
+                }
+
+                if (cleanText.match(/^\d+\s*h\.?$/)) {
+                    // "2 h", "5 h."
+                    const hours = parseInt(cleanText.match(/\d+/)[0]);
+                    const date = new Date(now.getTime() - (hours * 60 * 60 * 1000));
+                    publicationDate = date.toISOString();
+                }
+
+                if (cleanText.match(/^\d+\s*j\.?$/)) {
+                    // "3 j", "1 j."
+                    const days = parseInt(cleanText.match(/\d+/)[0]);
+                    const date = new Date(now.getTime() - (days * 24 * 60 * 60 * 1000));
+                    publicationDate = date.toISOString();
+                }
+
+                if (cleanText.match(/^\d+\s*sem\.?$/)) {
+                    // "1 sem", "2 sem."
+                    const weeks = parseInt(cleanText.match(/\d+/)[0]);
+                    const date = new Date(now.getTime() - (weeks * 7 * 24 * 60 * 60 * 1000));
+                    publicationDate = date.toISOString();
+                }
+
+                if (cleanText.match(/^\d+\s*mois\.?$/)) {
+                    // "1 mois", "3 mois."
+                    const months = parseInt(cleanText.match(/\d+/)[0]);
+                    const date = new Date(now.getFullYear(), now.getMonth() - months, now.getDate());
+                    publicationDate = date.toISOString();
+                }
+
+                if (cleanText.match(/^\d+\s*ans?\.?$/)) {
+                    // "1 an", "2 ans"
+                    const years = parseInt(cleanText.match(/\d+/)[0]);
+                    const date = new Date(now.getFullYear() - years, now.getMonth(), now.getDate());
+                    publicationDate = date.toISOString();
+                }
+            }
+
+            // Texte de la publication (inchangé)
+            const textElement = post.querySelector('.feed-shared-update-v2__description, .break-words');
+            const postText = textElement ? textElement.textContent.trim().substring(0, 300) : '';
+
+            // Auteur de la publication (inchangé)
+            const authorElement = post.querySelector('.feed-shared-actor__name, .update-components-actor__name');
+            const authorName = authorElement ? authorElement.textContent.trim() : '';
+
+            // Stats (utilise la fonction améliorée)
+            function extractPostStats(post) {
+                const stats = { reactions: 0, comments: 0, reposts: 0 };
+
+                try {
+                    // Réactions - Sélecteurs multiples avec fallbacks
+                    let reactionsEl = post.querySelector('.social-details-social-counts__social-proof-fallback-number');
+                    if (!reactionsEl) {
+                        reactionsEl = post.querySelector('.social-details-social-counts__reactions-count');
+                    }
+                    if (!reactionsEl) {
+                        reactionsEl = post.querySelector('[aria-label*="réaction"], [aria-label*="reaction"]');
+                    }
+
+                    if (reactionsEl) {
+                        const text = reactionsEl.textContent.trim();
+                        const match = text.match(/(\d[\d\s,\.]*)/);
+                        if (match) {
+                            stats.reactions = parseLinkedInNumber(match[1]);
+                        }
+                    }
+
+                    // Commentaires - Sélecteurs améliorés
+                    let commentsEl = post.querySelector('.social-details-social-counts__comments');
+                    if (!commentsEl) {
+                        commentsEl = post.querySelector('[aria-label*="commentaire"], [aria-label*="comment"]');
+                    }
+                    if (!commentsEl) {
+                        // Fallback vers le texte contenant "commentaire"
+                        const socialDetails = post.querySelector('.social-details-social-counts');
+                        if (socialDetails) {
+                            const spans = socialDetails.querySelectorAll('span');
+                            spans.forEach(span => {
+                                const text = span.textContent.toLowerCase();
+                                if (text.includes('commentaire') || text.includes('comment')) {
+                                    const match = span.textContent.match(/(\d[\d\s,\.]*)/);
+                                    if (match && !commentsEl) {
+                                        commentsEl = span;
+                                    }
+                                }
+                            });
+                        }
+                    }
+
+                    if (commentsEl) {
+                        const text = commentsEl.textContent.trim();
+                        const match = text.match(/(\d[\d\s,\.]*)/);
+                        if (match) {
+                            stats.comments = parseLinkedInNumber(match[1]);
+                        }
+                    }
+
+                    // Republications - Logique améliorée
+                    const nonReactionDetails = post.querySelector('[data-non-reaction-details]');
+                    if (nonReactionDetails) {
+                        const listItems = nonReactionDetails.querySelectorAll('li');
+                        if (listItems.length >= 2) {
+                            const repostLi = listItems[listItems.length - 1];
+                            const repostSpan = repostLi.querySelector('span');
+                            if (repostSpan) {
+                                const repostsText = repostSpan.textContent.trim();
+                                const match = repostsText.match(/(\d[\d\s,\.]*)/);
+                                if (match) {
+                                    stats.reposts = parseLinkedInNumber(match[1]);
+                                }
+                            }
+                        }
+                    }
+
+                    // Fallback pour les republications
+                    if (stats.reposts === 0) {
+                        let repostsEl = post.querySelector('.social-details-social-counts__item--reposts');
+                        if (!repostsEl) {
+                            repostsEl = post.querySelector('[aria-label*="republication"], [aria-label*="repost"]');
+                        }
+                        if (!repostsEl) {
+                            // Fallback vers le texte contenant "republication"
+                            const socialDetails = post.querySelector('.social-details-social-counts');
+                            if (socialDetails) {
+                                const spans = socialDetails.querySelectorAll('span');
+                                spans.forEach(span => {
+                                    const text = span.textContent.toLowerCase();
+                                    if ((text.includes('republication') || text.includes('repost')) && !repostsEl) {
+                                        const match = span.textContent.match(/(\d[\d\s,\.]*)/);
+                                        if (match) {
+                                            repostsEl = span;
+                                        }
+                                    }
+                                });
+                            }
+                        }
+
+                        if (repostsEl) {
+                            const text = repostsEl.textContent.trim();
+                            const match = text.match(/(\d[\d\s,\.]*)/);
+                            if (match) {
+                                stats.reposts = parseLinkedInNumber(match[1]);
+                            }
+                        }
+                    }
+
+                    return stats;
+                } catch (error) {
+                    console.error('Erreur extraction stats:', error);
+                    return stats;
+                }
+            }
+
+            const stats = extractPostStats(post);
+            publications.push({
+                id: dataUrn, // URN complet
+                urn: dataUrn, // Alias pour clarté
+                text: postText,
+                author: authorName,
+                isRepost: isRepost,
+                type: isRepost ? 'repost' : 'original',
+                publishedDate: publicationDate, // Remplace timestamp
+                rawDateText: rawDateText, // Garder le texte original pour debug
+                collectedAt: new Date().toISOString(), // Moment de la collecte
+                stats: stats
+            });
         });
 
         return publications;
@@ -368,78 +559,35 @@ function scrapePublications() {
     }
 }
 
-// Scraping des statistiques d'une publication
-function scrapePostStats() {
-    const data = {
-        timestamp: new Date().toISOString(),
-        type: 'post',
-        url: window.location.href,
-        stats: {
-            impressions: 0,
-            reach: 0,
-            reactions: 0,
-            comments: 0,
-            reposts: 0
-        }
-    };
 
+
+function checkActivityPageLoaded() {
     try {
-        // Impressions
-        const impressionsEl = document.querySelector('[aria-label*="impression"]');
-        if (impressionsEl) {
-            const match = impressionsEl.textContent.match(/(\d[\d\s,]*)/);
-            if (match) data.stats.impressions = parseInt(match[1].replace(/[\s,]/g, ''));
-        }
+        const hasActivityUrl = window.location.href.includes('/recent-activity/all/');
+        const hasPublications = document.querySelectorAll('.feed-shared-update-v2').length > 0;
+        const hasActivityContainer = document.querySelector('.scaffold-finite-scroll__content') !== null;
+        const noSpinner = !document.querySelector('.artdeco-spinner, .loading, [role="progressbar"]');
 
-        // Réactions
-        const reactionsEl = document.querySelector('.social-details-social-counts__reactions-count');
-        if (reactionsEl) {
-            const match = reactionsEl.textContent.match(/(\d[\d\s,]*)/);
-            if (match) data.stats.reactions = parseInt(match[1].replace(/[\s,]/g, ''));
-        }
+        const isLoaded = hasActivityUrl && (hasPublications || hasActivityContainer) && noSpinner;
 
-        // Commentaires
-        const commentsEl = document.querySelector('.social-details-social-counts__comments');
-        if (commentsEl) {
-            const match = commentsEl.textContent.match(/(\d[\d\s,]*)/);
-            if (match) data.stats.comments = parseInt(match[1].replace(/[\s,]/g, ''));
-        }
-
-        // Republications
-        const repostsEl = document.querySelector('.social-details-social-counts__item--reposts');
-        if (repostsEl) {
-            const match = repostsEl.textContent.match(/(\d[\d\s,]*)/);
-            if (match) data.stats.reposts = parseInt(match[1].replace(/[\s,]/g, ''));
-        }
-
-        return data;
+        return { isLoaded };
     } catch (error) {
-        console.error('Erreur scraping post:', error);
-        return null;
+        return { isLoaded: false };
     }
 }
 
-// === GESTION DU STOCKAGE ===
+// ========================================
+// 5. GESTION DES DONNÉES
+// ========================================
 
-// Sauvegarde dans le storage local
-async function saveToStorage(key, data, isArray = false) {
+async function saveToStorage(key, data) {
     try {
-        let stored = await chrome.storage.local.get(key);
-
-        if (isArray) {
-            stored[key] = stored[key] || [];
-            stored[key].push(data);
-        } else {
-            stored[key] = data;
-        }
-
-        await chrome.storage.local.set(stored);
+        await chrome.storage.local.set({ [key]: data });
     } catch (error) {
         console.error('Erreur sauvegarde:', error);
     }
 }
 
-// Chargement et affichage des stats stockées
 async function loadStoredStats() {
     try {
         const data = await chrome.storage.local.get(null);
@@ -450,18 +598,15 @@ async function loadStoredStats() {
             return;
         }
 
-        // Affichage du profil
+
         if (data.profile) {
             const profileCard = createStatCard('Profil', data.profile);
             statsList.appendChild(profileCard);
         }
 
-        // Affichage des publications suivies
-        if (data.trackedPosts && data.trackedPosts.length > 0) {
-            data.trackedPosts.forEach(post => {
-                const postCard = createStatCard('Publication', post);
-                statsList.appendChild(postCard);
-            });
+        if (data.publications && data.publications.length > 0) {
+            const publicationsCard = createStatCard('Publications', data.publications);
+            statsList.appendChild(publicationsCard);
         }
 
     } catch (error) {
@@ -469,7 +614,6 @@ async function loadStoredStats() {
     }
 }
 
-// Création d'une carte de statistiques
 function createStatCard(type, data) {
     const card = document.createElement('div');
     card.className = 'stat-card';
@@ -479,47 +623,61 @@ function createStatCard(type, data) {
       <span class="stat-type">${type}</span>
       <span class="stat-time">${new Date(data.timestamp).toLocaleString('fr-FR')}</span>
     </div>
-    <div class="stat-content">
-  `;
+    <div class="stat-content">`;
 
     if (type === 'Profil') {
         content += `<p><strong>Abonnés:</strong> ${data.followers || 0}</p>`;
 
-        // Affichage détaillé des compétences
         if (data.skills && data.skills.length > 0) {
             const totalSkills = data.skills.length;
             const skillsWithExperience = data.skills.filter(skill => skill.hasExperiences).length;
-            const totalExperiences = data.skills.reduce((sum, skill) => sum + (skill.experienceCount || 0), 0);
+            content += `<p><strong>Compétences:</strong> ${totalSkills}</p>`;
+            content += `<p><strong>Avec expériences:</strong> ${skillsWithExperience}</p>`;
+        }
+    } else if (type === 'Publications') {
+        if (Array.isArray(data)) {
+            const originalPosts = data.filter(p => !p.isRepost).length;
+            const reposts = data.filter(p => p.isRepost).length;
+            const totalStats = data.reduce((sum, p) => {
+                const stats = p.stats || { reactions: 0, comments: 0, reposts: 0 };
+                return {
+                    reactions: sum.reactions + (parseInt(stats.reactions) || 0),
+                    comments: sum.comments + (parseInt(stats.comments) || 0),
+                    reposts: sum.reposts + (parseInt(stats.reposts) || 0)
+                };
+            }, { reactions: 0, comments: 0, reposts: 0 });
 
             content += `
-        <p><strong>Compétences:</strong> ${totalSkills}</p>
-        <p><strong>Avec expériences:</strong> ${skillsWithExperience}</p>
-        <p><strong>Total expériences:</strong> ${totalExperiences}</p>
-      `;
+              <p><strong>Total:</strong> ${data.length} publications</p>
+              <p><strong>Originales:</strong> ${originalPosts}</p>
+              <p><strong>Republications:</strong> ${reposts}</p>
+              <p><strong>👍 Réactions totales:</strong> ${totalStats.reactions}</p>
+              <p><strong>💬 Commentaires totaux:</strong> ${totalStats.comments}</p>
+              <p><strong>🔄 Republications totales:</strong> ${totalStats.reposts}</p>
+            `;
 
-            // Afficher les top 5 compétences avec le plus d'expériences
-            const topSkills = data.skills
-                .filter(skill => skill.experienceCount > 0)
-                .sort((a, b) => b.experienceCount - a.experienceCount)
-                .slice(0, 5);
+            // Afficher quelques exemples de dates
+            const recentPosts = data.slice(0, 3);
+            if (recentPosts.length > 0) {
+                content += `<p><strong>Publications récentes:</strong></p>`;
+                recentPosts.forEach((post, i) => {
+                    const shortUrn = post.urn ? post.urn.split(':').pop().substring(0, 8) + '...' : 'N/A';
 
-            if (topSkills.length > 0) {
-                content += `<p><strong>Top compétences:</strong></p>`;
-                topSkills.forEach(skill => {
-                    content += `<p style="font-size:12px; margin-left:10px;">• ${skill.name} (${skill.experienceCount})</p>`;
+                    // Formater publishedDate au lieu de rawDateText
+                    const publishedDate = post.publishedDate ?
+                        new Date(post.publishedDate).toLocaleDateString('fr-FR', {
+                            day: '2-digit',
+                            month: '2-digit',
+                            year: 'numeric'
+                        }) : 'Date inconnue';
+
+                    content += `<p style="font-size:12px; margin-left:10px;">• ${shortUrn} (${publishedDate})</p>`;
                 });
+                if (data.length > 3) {
+                    content += `<p style="font-size:12px; margin-left:10px; color: #666;">• ... et ${data.length - 3} autres publications</p>`;
+                }
             }
-        } else {
-            content += `<p><strong>Compétences:</strong> 0</p>`;
         }
-
-    } else if (type === 'Publication') {
-        content += `
-      <p><strong>👁️ Impressions:</strong> ${data.stats?.impressions || 0}</p>
-      <p><strong>❤️ Réactions:</strong> ${data.stats?.reactions || 0}</p>
-      <p><strong>💬 Commentaires:</strong> ${data.stats?.comments || 0}</p>
-      <p><strong>🔄 Republications:</strong> ${data.stats?.reposts || 0}</p>
-    `;
     }
 
     content += '</div>';
@@ -527,27 +685,27 @@ function createStatCard(type, data) {
     return card;
 }
 
-// === UTILITAIRES UI ===
+// ========================================
+// 6. UTILITAIRES UI
+// ========================================
 
-// Gestion du state de chargement des boutons
 function setButtonLoading(button, isLoading) {
     if (isLoading) {
         button.disabled = true;
-        button.classList.add('opacity-50', 'cursor-not-allowed');
+        button.classList.add('loading');
         button.textContent = 'Chargement...';
     } else {
         button.disabled = false;
-        button.classList.remove('opacity-50', 'cursor-not-allowed');
+        button.classList.remove('loading');
         button.textContent = button.id === 'getProfileBtn'
-            ? 'Récupérer les statistiques du profil'
-            : 'Récupérer mes publications récentes';
+            ? 'Récupérer le profil'
+            : 'Récupérer mes publications';
     }
 }
 
-// Affichage des notifications
 function showNotification(message, type = 'info') {
     const notification = document.createElement('div');
-    notification.className = `status status--${type} fixed top-4 right-4 z-50`;
+    notification.className = `notification ${type}`;
     notification.textContent = message;
 
     document.body.appendChild(notification);
@@ -555,4 +713,10 @@ function showNotification(message, type = 'info') {
     setTimeout(() => {
         notification.remove();
     }, 3000);
+}
+
+// Fonction manquante pour l'ajout manuel (conservée pour la compatibilité)
+async function addPublicationManually(e) {
+    e.preventDefault();
+    showNotification('Fonctionnalité à implémenter', 'info');
 }

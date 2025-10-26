@@ -30,6 +30,7 @@ body {
     background: white;
     width: 380px;
     padding: 16px;
+    max-height: 90vh;
 }
 
 /* Header */
@@ -191,7 +192,6 @@ h2 {
 
 /* Liste des stats */
 .stats-list {
-    max-height: 300px;
     overflow-y: auto;
 }
 

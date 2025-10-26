@@ -7,39 +7,40 @@
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-<!-- Logo -->
-<div class="header">
-    <div class="logo">LXP</div>
-    <h1>LinkXP - LinkedIn Stats</h1>
-</div>
-
-<!-- Actions principales -->
-<div class="actions-container">
-    <button id="getProfileBtn" type="button" class="btn btn-primary">
-        📊 Récupérer le profil
-    </button>
-    <button id="getPublicationsBtn" type="button" class="btn btn-secondary">
-        📝 Mes publications
-    </button>
-</div>
-
-<!-- Ajout manuel de publication -->
-<div class="form-section">
-    <h2>Ajouter une publication</h2>
-    <form id="addPublicationForm" class="form-inline">
-        <input type="url" id="publicationUrl" placeholder="URL LinkedIn de la publication" class="form-control" required>
-        <button type="submit" class="btn btn-small">+</button>
-    </form>
-</div>
-
-<!-- Historique -->
-<div class="stats-section">
-    <h2>Données collectées</h2>
-    <div id="statsList" class="stats-list">
-        <div class="empty-state">Aucune donnée collectée</div>
+    <!-- Logo -->
+    <div class="header">
+        <div class="logo">LXP</div>
+        <h1>LinkXP - LinkedIn Stats</h1>
     </div>
-</div>
 
-<script src="popup.js"></script>
+    <!-- Actions principales -->
+    <div class="actions-container">
+        <button id="getProfileBtn" type="button" class="btn btn-primary">
+            📊 Récupérer mon profil
+        </button>
+        <button id="getPublicationsBtn" type="button" class="btn btn-secondary">
+            📝 Récupérer mes publications
+        </button>
+    </div>
+
+    <!-- Ajout manuel de publication -->
+    <div class="form-section">
+        <h2>Ajouter une publication</h2>
+        <form id="addPublicationForm" class="form-inline">
+            <input type="url" id="publicationUrl" placeholder="URL LinkedIn de la publication" class="form-control"
+                   required>
+            <button type="submit" class="btn btn-small">+</button>
+        </form>
+    </div>
+
+    <!-- Historique -->
+    <div class="stats-section">
+        <h2>Données collectées</h2>
+        <div id="statsList" class="stats-list">
+            <div class="empty-state">Aucune donnée collectée</div>
+        </div>
+    </div>
+
+    <script src="popup.js"></script>
 </body>
 </html>

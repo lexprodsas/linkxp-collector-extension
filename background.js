@@ -102,9 +102,9 @@ async function syncDataToAPI(data) {
 // Nettoyage périodique des anciennes données (optionnel)
 chrome.alarms.create('cleanupOldData', { periodInMinutes: 1440 }); // 24h
 
-chrome.alarms.onAlarm.addListener((alarm) => {
+chrome.alarms.onAlarm.addListener(async (alarm) => {
     if (alarm.name === 'cleanupOldData') {
-        cleanupOldData();
+        await cleanupOldData();
     }
 });
 
