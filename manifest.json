@@ -8,7 +8,8 @@
     "storage",
     "activeTab",
     "scripting",
-    "alarms"
+    "alarms",
+    "tabs"
   ],
 
   "host_permissions": [
@@ -22,6 +23,10 @@
       "matches": ["<all_urls>"]
     }
   ],
+
+  "externally_connectable": {
+    "matches": ["https://app.linkxp.net/*"]
+  },
 
   "action": {
     "default_popup": "popup.html",

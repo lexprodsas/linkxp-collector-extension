@@ -20,6 +20,27 @@ async function sendMessageToBackground(action, data = {}) {
     });
 }
 
+// Fonction utilitaire pour attendre la fermeture d'un onglet
+function waitForTabClosure(tabId) {
+    return new Promise((resolve) => {
+        const checkClosed = () => {
+            chrome.tabs.get(tabId, (tab) => {
+                if (chrome.runtime.lastError) {
+                    // L'onglet a été fermé (erreur = tab not found)
+                    resolve(true);
+                } else {
+                    // L'onglet existe encore, vérifier à nouveau dans 1 seconde
+                    setTimeout(checkClosed, 1000);
+                }
+            });
+        };
+
+        // Commencer à vérifier après 2 secondes (laisser le temps à l'onglet de s'ouvrir)
+        setTimeout(checkClosed, 2000);
+    });
+}
+
+
 async function linkAccount() {
     try {
         const result = await sendMessageToBackground('checkAuthStatus');
@@ -36,41 +57,28 @@ async function linkAccount() {
             return;
         }
 
-        // Processus de liaison
+        // Processus de liaison simplifié
         setButtonLoading(linkAccountBtn, true);
         showNotification('Initialisation de la liaison...', 'info');
 
-        // Étape 1: Demander un device link token
+        // Étape 1: Demander device link token
         const deviceData = await sendMessageToBackground('initDeviceLinking');
 
-        showNotification('Ouverture de la page de validation...', 'info');
-
         // Étape 2: Ouvrir la page de validation
-        const validationUrl = sendMessageToBackground.getWebUrl(deviceData.validation_url);
-        await sendMessageToBackground.openValidationPage(validationUrl);
+        const validationUrl = `https://app.linkxp.net${deviceData.validation_url}`;
+        chrome.tabs.create({ url: validationUrl, active: true });
 
-        showNotification('Vérification de la liaison...', 'info');
-
-        // Étape 3: Confirmer la liaison (attendre un peu)
-        await new Promise(resolve => setTimeout(resolve, 2000));
-
-        const tokens = await sendMessageToBackground.confirmDeviceLinking(deviceData.link_token);
-
-        showNotification('Compte lié avec succès !', 'success');
-        await updateAuthStatus();
+        showNotification('Page ouverte ! Connectez-vous et validez la liaison.', 'success');
+        showNotification('L\'extension se liera automatiquement après validation.', 'info');
 
     } catch (error) {
         console.error('Erreur liaison compte:', error);
-
-        if (error.message.includes('EXPIRED')) {
-            showNotification('Le lien a expiré. Veuillez réessayer.', 'error');
-        } else {
-            showNotification('Erreur: ' + error.message, 'error');
-        }
+        showNotification('Erreur: ' + error.message, 'error');
     } finally {
         setButtonLoading(linkAccountBtn, false);
     }
 }
+
 
 async function syncProfileToAPI(accessToken, profileData) {
     const payload = {

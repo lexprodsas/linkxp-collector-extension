@@ -51,6 +51,25 @@ class BackgroundLinkXPAuth {
         }
     }
 
+    // Étape 2
+    async saveTokensFromWeb(tokens) {
+        try {
+            // Calculer l'expiration (15 minutes par défaut)
+            const expiresAt = Date.now() + (15 * 60 * 1000);
+
+            await chrome.storage.local.set({
+                [this.storageKeys.accessToken]: tokens.access_token,
+                [this.storageKeys.refreshToken]: tokens.refresh_token,
+                [this.storageKeys.deviceId]: tokens.device_id,
+                [this.storageKeys.tokenExpires]: expiresAt
+            });
+
+            console.log('✅ Tokens web sauvegardés');
+        } catch (error) {
+            console.error('Erreur sauvegarde tokens web:', error);
+        }
+    }
+
     // Étape 3: Confirmer la liaison
     async confirmDeviceLinking(linkToken) {
         try {
@@ -377,6 +396,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
 });
 
+// Écouter les messages postMessage depuis les pages web
+chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
+    console.log('Message externe reçu:', message);
+
+    if (message.type === 'DEVICE_LINK_SUCCESS' && message.data) {
+        // Sauvegarder les tokens reçus
+        const tokens = message.data;
+        backgroundAuth.saveTokensFromWeb(tokens);
+
+        sendResponse({ success: true });
+        console.log('✅ Tokens sauvegardés depuis la page web');
+    }
+});
+
 // Synchronisation avec l'API (préparé pour le futur)
 async function syncDataToAPI(data) {
     try {
@@ -450,6 +483,7 @@ async function cleanupOldData() {
         console.error('Erreur nettoyage:', error);
     }
 }
+
 
 // Gestion des erreurs globales
 self.addEventListener('error', (event) => {
