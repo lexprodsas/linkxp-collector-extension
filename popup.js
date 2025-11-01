@@ -123,7 +123,6 @@ async function syncPublicationsToAPI(accessToken, publications) {
         urn: pub.urn,
         text: pub.text || '',
         author: pub.author || '',
-        isRepost: pub.isRepost || false,
         type: pub.type || (pub.isRepost ? 'repost' : 'original'),
         publishedDate: pub.publishedDate || pub.timestamp || new Date().toISOString(),
         rawDateText: pub.rawDateText || '',
@@ -804,7 +803,6 @@ function scrapePublicationsData() {
                 urn: dataUrn, // Alias pour clarté
                 text: postText,
                 author: authorName,
-                isRepost: isRepost,
                 type: isRepost ? 'repost' : 'original',
                 publishedDate: publicationDate, // Remplace timestamp
                 rawDateText: rawDateText, // Garder le texte original pour debug
