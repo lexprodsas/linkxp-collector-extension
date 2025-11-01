@@ -170,17 +170,14 @@ class BackgroundLinkXPAuth {
         const formattedPublications = publications.map(pub => ({
             urn: pub.urn,
             text: pub.text || '',
-            author: pub.author || '',
-            isRepost: pub.isRepost || false,
-            type: pub.type || (pub.isRepost ? 'repost' : 'original'),
             publishedDate: pub.publishedDate || pub.timestamp || new Date().toISOString(),
-            rawDateText: pub.rawDateText || '',
-            collectedAt: pub.collectedAt || pub.timestamp || new Date().toISOString(),
-            stats: {
-                reactions: pub.stats?.reactions || 0,
-                comments: pub.stats?.comments || 0,
-                reposts: pub.stats?.reposts || 0
-            }
+            reactions: pub.stats?.reactions || 0,
+            comments: pub.stats?.comments || 0,
+            reposts: pub.isRepost || false,
+            impressions: 0, // Non disponible dans le scraping LinkedIn
+            type: pub.type || (pub.isRepost ? 'repost' : 'original'),
+            hasMedia: false, // Non détecté actuellement
+            tstamp: pub.collectedAt || pub.timestamp || new Date().toISOString(),
         }));
 
         const response = await fetch(this.getFullUrl('/linkedin/publications'), {

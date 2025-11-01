@@ -384,24 +384,24 @@ async function collectSkillsOnly(tabId) {
 async function collectPublications() {
     try {
         setButtonLoading(getPublicationsBtn, true);
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-        if (!tab.url.includes('linkedin.com')) {
+        const tab = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab[0].url.includes('linkedin.com')) {
             showNotification('Veuillez ouvrir LinkedIn', 'error');
             return;
         }
 
-        const isOnActivityPage = tab.url.includes('/recent-activity/all/');
+        const isOnActivityPage = tab[0].url.includes('recent-activity/all');
 
         if (isOnActivityPage) {
-            await performPublicationsCollection(tab.id);
+            await performPublicationsCollection(tab[0].id);
         } else {
-            await redirectToActivityPageAndCollect(tab);
+            await redirectToActivityPageAndCollect(tab[0]);
         }
 
     } catch (error) {
         console.error('Erreur collecte publications:', error);
-        showNotification('Erreur: ' + error.message, 'error');
+        showNotification(`Erreur: ${error.message}`, 'error');
     } finally {
         setButtonLoading(getPublicationsBtn, false);
     }
@@ -500,12 +500,18 @@ async function performPublicationsCollection(tabId) {
         return;
     }
 
+    // Sauvegarder localement
     await saveToStorage('publications', publications);
 
-    const originalPosts = publications.filter(p => !p.isRepost).length;
-    const reposts = publications.filter(p => p.isRepost).length;
+    // Envoyer à l'API immédiatement
+    try {
+        await sendMessageToBackground('syncPublications', { publications });
+        showNotification(`${publications.length} publications collectées et synchronisées !`, 'success');
+    } catch (syncError) {
+        showNotification(`${publications.length} publications collectées localement.`, 'warning');
+        console.error('Erreur sync API publications:', syncError);
+    }
 
-    showNotification(`${publications.length} publications collectées (${originalPosts} originales, ${reposts} partages)`, 'success');
     await loadStoredStats();
 }
 
@@ -581,6 +587,23 @@ function scrapeSkillsData() {
 }
 
 function scrapePublicationsData() {
+
+    // Fonction parseLinkedInNumber directement dans le contexte injecté
+    const parseLinkedInNumber = (str) => {
+        if (!str) return 0;
+        const cleaned = str.replace(/\s/g, '').replace(',', '.');
+
+        if (cleaned.includes('k') || cleaned.includes('K')) {
+            return Math.round(parseFloat(cleaned) * 1000);
+        }
+
+        if (cleaned.includes('M')) {
+            return Math.round(parseFloat(cleaned) * 1000000);
+        }
+
+        return parseInt(cleaned.replace(/[^\d]/g, '')) || 0;
+    };
+
     const publications = [];
 
     try {
