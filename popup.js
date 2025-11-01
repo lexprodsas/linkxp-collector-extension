@@ -5,6 +5,7 @@ const statsList = document.getElementById('statsList');
 const linkAccountBtn = document.getElementById('linkAccountBtn');
 const syncApiBtn = document.getElementById('syncApiBtn');
 const authStatus = document.getElementById('authStatus');
+const getSkillsBtn = document.getElementById('getSkillsBtn');
 
 async function sendMessageToBackground(action, data = {}) {
     return new Promise((resolve, reject) => {
@@ -212,11 +213,8 @@ async function syncToAPI() {
 }
 
 function setupEventListeners() {
-    getProfileBtn.addEventListener('click', () => {
-        console.log('CLICK getProfileBtn');
-        collectProfileStats();
-    });
-    getPublicationsBtn.addEventListener('click', collectPublications);
+    getProfileBtn.addEventListener('click', collectFollowersOnly);
+    getSkillsBtn.addEventListener('click', collectSkillsOnly);
     addPublicationForm.addEventListener('submit', addPublicationManually);
 
     linkAccountBtn.addEventListener('click', linkAccount);
@@ -263,116 +261,266 @@ document.addEventListener('DOMContentLoaded', async () => {
 // 2. COLLECTE PROFIL (ABONNÉS + COMPÉTENCES)
 // ========================================
 
-async function collectProfileStats() {
+async function performFollowersCollection(tabId) {
+    const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: scrapeFollowersOnly
+    });
+
+    const followersData = results[0].result;
+    if (!followersData) {
+        showNotification('Erreur lors de la collecte des abonnés', 'error');
+        return;
+    }
+
+    // Envoyer UNIQUEMENT les abonnés à l'API
+    try {
+        await sendMessageToBackground('syncFollowers', followersData);
+        showNotification(`${followersData.followers} abonnés synchronisés !`, 'success');
+    } catch (syncError) {
+        showNotification('Erreur sync API abonnés', 'error');
+        console.error('Erreur sync API:', syncError);
+    }
+}
+async function waitForProfileLoadThenCollect(tabId) {
+    let attempts = 0;
+    const maxAttempts = 15;
+
+    const checkPageAndCollect = async () => {
+        attempts++;
+
+        try {
+            const results = await chrome.scripting.executeScript({
+                target: { tabId },
+                func: () => {
+                    const isProfilePage = window.location.href.includes('linkedin.com/in/');
+                    const hasFollowers = document.querySelector('.ember-view.link-without-visited-state .t-bold') !== null;
+                    const isLoaded = isProfilePage && hasFollowers;
+
+                    return { isLoaded, isProfilePage, hasFollowers };
+                }
+            });
+
+            const result = results[0].result;
+
+            if (result.isLoaded) {
+                showNotification('Profil chargé ! Collecte des abonnés...', 'success');
+                await performFollowersCollection(tabId);
+                return;
+            }
+
+            if (attempts < maxAttempts) {
+                showNotification(`Chargement... ${attempts}/${maxAttempts}`, 'info');
+                setTimeout(checkPageAndCollect, 2000);
+            } else {
+                showNotification('Délai dépassé. Tentative de collecte...', 'warning');
+                await performFollowersCollection(tabId);
+            }
+
+        } catch (error) {
+            if (attempts < maxAttempts) {
+                setTimeout(checkPageAndCollect, 2000);
+            } else {
+                showNotification('Erreur de chargement', 'error');
+            }
+        }
+    };
+
+    setTimeout(checkPageAndCollect, 1000);
+}
+async function redirectToProfileAndCollect(tab) {
+    try {
+        showNotification('Redirection vers votre profil...', 'info');
+
+        // Rediriger vers le profil de l'utilisateur
+        const profileUrl = 'https://www.linkedin.com/in/me/';
+        await chrome.tabs.update(tab.id, { url: profileUrl });
+
+        // Attendre le chargement puis collecter
+        await waitForProfileLoadThenCollect(tab.id);
+
+    } catch (error) {
+        console.error('Erreur redirection profil:', error);
+        showNotification('Erreur lors de la redirection', 'error');
+    }
+}
+async function collectFollowersOnly() {
     try {
         setButtonLoading(getProfileBtn, true);
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-        if (!tab.url.includes('linkedin.com')) {
+        const tab = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab[0].url.includes('linkedin.com')) {
             showNotification('Veuillez ouvrir LinkedIn', 'error');
             return;
         }
 
-        if (tab.url.includes('/details/skills/')) {
-            await collectSkillsOnly(tab.id);
-        } else if (tab.url.includes('/in/')) {
-            await collectProfileAndSkills(tab.id);
+        const isOnProfilePage = tab[0].url.includes('linkedin.com/in/') &&
+            !tab[0].url.includes('/details/') &&
+            !tab[0].url.includes('/recent-activity/');
+
+        if (isOnProfilePage) {
+            // Directement sur la page profil
+            await performFollowersCollection(tab[0].id);
         } else {
-            showNotification('Veuillez aller sur votre profil LinkedIn', 'error');
+            // Rediriger vers la page profil de l'utilisateur
+            await redirectToProfileAndCollect(tab[0]);
         }
 
     } catch (error) {
-        console.error('Erreur collecte profil:', error);
-        showNotification('Erreur: ' + error.message, 'error');
+        console.error('Erreur collecte abonnés:', error);
+        showNotification(`Erreur: ${error.message}`, 'error');
     } finally {
         setButtonLoading(getProfileBtn, false);
     }
 }
+// Fonction pour effectuer la collecte des compétences
+async function performSkillsCollection(tabId) {
+    const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: scrapeSkillsData
+    });
 
-async function collectProfileAndSkills(tabId) {
+    const skills = results[0].result;
+    if (skills.length === 0) {
+        showNotification('Aucune compétence trouvée', 'warning');
+        return;
+    }
+
+    // Envoyer UNIQUEMENT les compétences à l'API
     try {
-        // Scraper les données du profil
-        const results = await chrome.scripting.executeScript({
-            target: { tabId },
-            func: scrapeProfileData
-        });
+        await sendMessageToBackground('syncSkills', { skills });
+        showNotification(`${skills.length} compétences synchronisées !`, 'success');
+    } catch (syncError) {
+        showNotification('Erreur sync API compétences', 'error');
+        console.error('Erreur sync API:', syncError);
+    }
+}
+// Fonction pour attendre le chargement de la page des compétences
+async function waitForSkillsPageThenCollect(tabId) {
+    let attempts = 0;
+    const maxAttempts = 15;
 
-        const profileData = results[0].result;
-        if (!profileData) {
-            showNotification('Erreur lors de la collecte du profil', 'error');
-            return;
-        }
+    const checkPageAndCollect = async () => {
+        attempts++;
 
-        // Sauvegarder localement
-        await saveToStorage('profile', profileData);
-
-        // Envoyer à l'API immédiatement
         try {
-            await sendMessageToBackground('syncProfile', { profileData });
-            showNotification('Profil collecté et synchronisé avec l\'API !', 'success');
-        } catch (syncError) {
-            showNotification('Profil collecté localement. Sync API échouée.', 'warning');
-            console.error('Erreur sync API profil:', syncError);
+            const results = await chrome.scripting.executeScript({
+                target: { tabId },
+                func: () => {
+                    const isSkillsPage = window.location.href.includes('/details/skills/');
+                    const hasSkills = document.querySelectorAll('[data-field="skill_page_skill_topic"]').length > 0;
+                    const isLoaded = isSkillsPage && hasSkills;
+
+                    return { isLoaded, isSkillsPage, hasSkills };
+                }
+            });
+
+            const result = results[0].result;
+
+            if (result.isLoaded) {
+                showNotification('Page des compétences chargée ! Chargement complet...', 'info');
+
+                // Scroll automatique pour charger toutes les compétences
+                await chrome.scripting.executeScript({
+                    target: { tabId },
+                    func: scrollToLoadAllSkills
+                });
+
+                // Attendre que le scroll soit terminé
+                await new Promise(resolve => setTimeout(resolve, 3000));
+
+                // Collecter
+                await performSkillsCollection(tabId);
+                return;
+            }
+
+            if (attempts < maxAttempts) {
+                showNotification(`Chargement compétences... ${attempts}/${maxAttempts}`, 'info');
+                setTimeout(checkPageAndCollect, 2000);
+            } else {
+                showNotification('Délai dépassé. Tentative de collecte...', 'warning');
+                await performSkillsCollection(tabId);
+            }
+
+        } catch (error) {
+            if (attempts < maxAttempts) {
+                setTimeout(checkPageAndCollect, 2000);
+            } else {
+                showNotification('Erreur de chargement des compétences', 'error');
+            }
         }
+    };
 
-        await loadStoredStats();
+    setTimeout(checkPageAndCollect, 1000);
+}
+async function redirectToSkillsPageAndCollect(tab) {
+    try {
+        // Détecter le profil utilisateur depuis l'URL ou le DOM
+        const profileMatch = tab.url.match(/linkedin\.com\/in\/([^/]+)/);
 
-        // Continuer vers les compétences
-        await chrome.storage.local.set({ autoCollectSkills: true });
-        const currentTab = await chrome.tabs.query({ active: true, currentWindow: true });
-        const profileMatch = currentTab[0].url.match(/linkedin\.com\/in\/([^/]+)/);
+        if (!profileMatch) {
+            // Extraire depuis le DOM si pas dans l'URL
+            const results = await chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                func: () => {
+                    const profileLink = document.querySelector('a.profile-card-profile-picture-container');
+                    if (profileLink && profileLink.href) {
+                        const match = profileLink.href.match(/linkedin\.com\/in\/([^/]+)/);
+                        return match ? match[1] : null;
+                    }
+                    return null;
+                }
+            });
 
-        if (profileMatch) {
+            const profileURI = results[0].result;
+            if (!profileURI) {
+                showNotification('Impossible de détecter votre profil. Allez sur votre page LinkedIn.', 'error');
+                return;
+            }
+
+            const skillsUrl = `https://www.linkedin.com/in/${profileURI}/details/skills/`;
+            showNotification('Redirection vers vos compétences...', 'info');
+            await chrome.tabs.update(tab.id, { url: skillsUrl });
+        } else {
             const skillsUrl = `https://www.linkedin.com/in/${profileMatch[1]}/details/skills/`;
-            await chrome.tabs.create({ url: skillsUrl });
-            showNotification('Page des compétences ouverte ! Collecte automatique en cours...', 'info');
+            showNotification('Redirection vers vos compétences...', 'info');
+            await chrome.tabs.update(tab.id, { url: skillsUrl });
         }
+
+        // Attendre le chargement puis collecter
+        await waitForSkillsPageThenCollect(tab.id);
 
     } catch (error) {
-        console.error('Erreur collecte profil:', error);
-        showNotification(`Erreur: ${error.message}`, 'error');
+        console.error('Erreur redirection compétences:', error);
+        showNotification('Erreur lors de la redirection', 'error');
     }
 }
 
-async function collectSkillsOnly(tabId) {
+async function collectSkillsOnly() {
     try {
-        const results = await chrome.scripting.executeScript({
-            target: { tabId },
-            func: scrapeSkillsData
-        });
+        setButtonLoading(getSkillsBtn, true);
 
-        const skills = results[0].result;
-        if (skills.length === 0) {
-            showNotification('Aucune compétence trouvée sur cette page', 'warning');
+        const tab = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab[0].url.includes('linkedin.com')) {
+            showNotification('Veuillez ouvrir LinkedIn', 'error');
             return;
         }
 
-        // Merger avec profil existant
-        const existingData = await chrome.storage.local.get(['profile']);
-        const profileData = {
-            ...existingData.profile,
-            timestamp: new Date().toISOString(),
-            type: 'profile',
-            skills: skills
-        };
+        const isOnSkillsPage = tab[0].url.includes('/details/skills/');
 
-        // Sauvegarder localement
-        await saveToStorage('profile', profileData);
-
-        // Envoyer à l'API immédiatement
-        try {
-            await sendMessageToBackground('syncProfile', { profileData });
-            showNotification(`${skills.length} compétences collectées et synchronisées !`, 'success');
-        } catch (syncError) {
-            showNotification(`${skills.length} compétences collectées localement.`, 'warning');
-            console.error('Erreur sync API compétences:', syncError);
+        if (isOnSkillsPage) {
+            // Déjà sur la page des compétences
+            await performSkillsCollection(tab[0].id);
+        } else {
+            // Rediriger vers la page des compétences
+            await redirectToSkillsPageAndCollect(tab[0]);
         }
-
-        await loadStoredStats();
 
     } catch (error) {
         console.error('Erreur collecte compétences:', error);
         showNotification(`Erreur: ${error.message}`, 'error');
+    } finally {
+        setButtonLoading(getSkillsBtn, false);
     }
 }
 
@@ -517,6 +665,55 @@ async function performPublicationsCollection(tabId) {
 // ========================================
 // 4. FONCTIONS DE SCRAPING (EXÉCUTÉES SUR LA PAGE)
 // ========================================
+
+function scrollToLoadAllSkills() {
+    return new Promise((resolve) => {
+        let lastHeight = document.body.scrollHeight;
+        let scrollCount = 0;
+        const maxScrolls = 10;
+
+        function scroll() {
+            window.scrollTo(0, document.body.scrollHeight);
+            scrollCount++;
+
+            setTimeout(() => {
+                let newHeight = document.body.scrollHeight;
+                if (newHeight > lastHeight && scrollCount < maxScrolls) {
+                    lastHeight = newHeight;
+                    scroll();
+                } else {
+                    window.scrollTo(0, 0); // Retour en haut
+                    resolve();
+                }
+            }, 1500);
+        }
+
+        scroll();
+    });
+}
+
+function scrapeFollowersOnly() {
+    try {
+        const followersElement = document.querySelector('.ember-view.link-without-visited-state .t-bold');
+        let followers = 0;
+
+        if (followersElement) {
+            const text = followersElement.textContent.trim();
+            const match = text.match(/(\d+[\d\s,]*)/);
+            if (match) {
+                followers = parseInt(match[1].replace(/[\s,]/g, ''), 10) || 0;
+            }
+        }
+
+        return {
+            followers: followers,
+            collectedAt: new Date().toISOString()
+        };
+    } catch (error) {
+        console.error('Erreur scraping abonnés:', error);
+        return null;
+    }
+}
 
 function scrapeProfileData() {
     const data = {

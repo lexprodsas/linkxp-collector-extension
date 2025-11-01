@@ -137,32 +137,6 @@ class BackgroundLinkXPAuth {
         }
     }
 
-    // Synchroniser le profil
-    async syncProfile(profileData) {
-        const accessToken = await this.getValidAccessToken();
-        const payload = {
-            followers: profileData.followers || 0,
-            skills: profileData.skills || [],
-            collectedAt: profileData.timestamp || new Date().toISOString()
-        };
-
-        const response = await fetch(this.getFullUrl('/linkedin/profile'), {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${accessToken}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(payload)
-        });
-
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.message || `Erreur ${response.status}`);
-        }
-
-        return await response.json();
-    }
-
     // Synchroniser les publications
     async syncPublications(publications) {
         const accessToken = await this.getValidAccessToken();
@@ -265,6 +239,59 @@ class BackgroundLinkXPAuth {
     async isLinked() {
         return await this.isTokenValid();
     }
+
+    // Ajouter ces nouvelles méthodes dans la classe BackgroundLinkXPAuth
+    async syncFollowers(followersData) {
+        const accessToken = await this.getValidAccessToken();
+
+        console.log('syncFollowers', followersData)
+
+        const payload = {
+            followers: followersData.followers,
+            collectedAt: followersData.collectedAt
+        };
+
+        const response = await fetch(this.getFullUrl('/linkedin/profile'), {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.message || `Erreur ${response.status}`);
+        }
+
+        return await response.json();
+    }
+
+    async syncSkills(skills) {
+        const accessToken = await this.getValidAccessToken();
+
+        const payload = {
+            skills: skills,
+            collectedAt: new Date().toISOString()
+        };
+
+        const response = await fetch(this.getFullUrl('/linkedin/profile'), {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.message || `Erreur ${response.status}`);
+        }
+
+        return await response.json();
+    }
 }
 
 const backgroundAuth = new BackgroundLinkXPAuth();
@@ -341,44 +368,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     sendResponse({ success: true });
                     return;
 
-                case 'syncProfile':
-                    const profileResult = await backgroundAuth.syncProfile(request.profileData);
-                    sendResponse({ success: true, data: profileResult });
-                    break;
-
                 case 'syncPublications':
                     const pubResult = await backgroundAuth.syncPublications(request.publications);
                     sendResponse({ success: true, data: pubResult });
                     break;
 
-                case 'syncToNewAPI':
-                    // Logique de sync complète avec la nouvelle API
-                    const data = await chrome.storage.local.get(['profile', 'publications']);
-                    let syncCount = 0;
+                case 'syncFollowers':
+                    const followersResult = await backgroundAuth.syncFollowers(request);
+                    sendResponse({ success: true, data: followersResult });
+                    break;
 
-                    if (data.profile) {
-                        await backgroundAuth.syncProfile(data.profile);
-                        syncCount++;
-                    }
-
-                    if (data.publications && data.publications.length > 0) {
-                        // Diviser en chunks de 20
-                        const chunks = [];
-                        for (let i = 0; i < data.publications.length; i += 20) {
-                            chunks.push(data.publications.slice(i, i + 20));
-                        }
-
-                        for (const chunk of chunks) {
-                            await backgroundAuth.syncPublications(chunk);
-                            syncCount++;
-                            // Pause pour rate limiting
-                            if (chunks.length > 1) {
-                                await new Promise(resolve => setTimeout(resolve, 1000));
-                            }
-                        }
-                    }
-
-                    sendResponse({ success: true, data: { syncCount } });
+                case 'syncSkills':
+                    const skillsResult = await backgroundAuth.syncSkills(request.skills);
+                    sendResponse({ success: true, data: skillsResult });
                     break;
 
                 default:
