@@ -40,6 +40,21 @@ function waitForTabClosure(tabId) {
     });
 }
 
+function parseLinkedInNumber(str) {
+    if (!str) return 0;
+
+    const cleaned = str.replace(/\s/g, '').replace(',', '.');
+
+    if (cleaned.includes('k') || cleaned.includes('K')) {
+        return Math.round(parseFloat(cleaned) * 1000);
+    }
+    if (cleaned.includes('M')) {
+        return Math.round(parseFloat(cleaned) * 1000000);
+    }
+
+    return parseInt(cleaned.replace(/[^\d]/g, '')) || 0;
+}
+
 
 async function linkAccount() {
     try {
@@ -145,10 +160,11 @@ function chunkArray(array, chunkSize) {
 
 async function syncToAPI() {
     try {
+        // TODO
         setButtonLoading(syncApiBtn, true);
 
         // Vérifier l'authentification
-        const accessToken = await sendMessageToBackground.getValidAccessToken();
+        const accessToken = await sendMessageToBackground('getValidAccessToken');
 
         showNotification('Synchronisation en cours...', 'info');
 
@@ -197,7 +213,10 @@ async function syncToAPI() {
 }
 
 function setupEventListeners() {
-    getProfileBtn.addEventListener('click', collectProfileStats);
+    getProfileBtn.addEventListener('click', () => {
+        console.log('CLICK getProfileBtn');
+        collectProfileStats();
+    });
     getPublicationsBtn.addEventListener('click', collectPublications);
     addPublicationForm.addEventListener('submit', addPublicationManually);
 
@@ -272,56 +291,90 @@ async function collectProfileStats() {
 }
 
 async function collectProfileAndSkills(tabId) {
-    const results = await chrome.scripting.executeScript({
-        target: { tabId },
-        func: scrapeProfileData
-    });
+    try {
+        // Scraper les données du profil
+        const results = await chrome.scripting.executeScript({
+            target: { tabId },
+            func: scrapeProfileData
+        });
 
-    const profileData = results[0].result;
-    if (!profileData) {
-        showNotification('Erreur lors de la collecte du profil', 'error');
-        return;
-    }
+        const profileData = results[0].result;
+        if (!profileData) {
+            showNotification('Erreur lors de la collecte du profil', 'error');
+            return;
+        }
 
-    await saveToStorage('profile', profileData);
-    showNotification('Profil collecté ! Ouverture de la page compétences...', 'success');
-    await loadStoredStats();
+        // Sauvegarder localement
+        await saveToStorage('profile', profileData);
 
-    // Ouvrir page compétences avec auto-collecte
-    await chrome.storage.local.set({ autoCollectSkills: true });
-    const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    const profileMatch = currentTab.url.match(/linkedin\.com\/in\/([^\/]+)/);
+        // Envoyer à l'API immédiatement
+        try {
+            await sendMessageToBackground('syncProfile', { profileData });
+            showNotification('Profil collecté et synchronisé avec l\'API !', 'success');
+        } catch (syncError) {
+            showNotification('Profil collecté localement. Sync API échouée.', 'warning');
+            console.error('Erreur sync API profil:', syncError);
+        }
 
-    if (profileMatch) {
-        const skillsUrl = `https://www.linkedin.com/in/${profileMatch[1]}/details/skills/`;
-        await chrome.tabs.create({ url: skillsUrl });
-        showNotification('Page des compétences ouverte ! Collecte automatique en cours...', 'info');
+        await loadStoredStats();
+
+        // Continuer vers les compétences
+        await chrome.storage.local.set({ autoCollectSkills: true });
+        const currentTab = await chrome.tabs.query({ active: true, currentWindow: true });
+        const profileMatch = currentTab[0].url.match(/linkedin\.com\/in\/([^/]+)/);
+
+        if (profileMatch) {
+            const skillsUrl = `https://www.linkedin.com/in/${profileMatch[1]}/details/skills/`;
+            await chrome.tabs.create({ url: skillsUrl });
+            showNotification('Page des compétences ouverte ! Collecte automatique en cours...', 'info');
+        }
+
+    } catch (error) {
+        console.error('Erreur collecte profil:', error);
+        showNotification(`Erreur: ${error.message}`, 'error');
     }
 }
 
 async function collectSkillsOnly(tabId) {
-    const results = await chrome.scripting.executeScript({
-        target: { tabId },
-        func: scrapeSkillsData
-    });
+    try {
+        const results = await chrome.scripting.executeScript({
+            target: { tabId },
+            func: scrapeSkillsData
+        });
 
-    const skills = results[0].result || [];
-    if (skills.length === 0) {
-        showNotification('Aucune compétence trouvée sur cette page', 'warning');
-        return;
+        const skills = results[0].result;
+        if (skills.length === 0) {
+            showNotification('Aucune compétence trouvée sur cette page', 'warning');
+            return;
+        }
+
+        // Merger avec profil existant
+        const existingData = await chrome.storage.local.get(['profile']);
+        const profileData = {
+            ...existingData.profile,
+            timestamp: new Date().toISOString(),
+            type: 'profile',
+            skills: skills
+        };
+
+        // Sauvegarder localement
+        await saveToStorage('profile', profileData);
+
+        // Envoyer à l'API immédiatement
+        try {
+            await sendMessageToBackground('syncProfile', { profileData });
+            showNotification(`${skills.length} compétences collectées et synchronisées !`, 'success');
+        } catch (syncError) {
+            showNotification(`${skills.length} compétences collectées localement.`, 'warning');
+            console.error('Erreur sync API compétences:', syncError);
+        }
+
+        await loadStoredStats();
+
+    } catch (error) {
+        console.error('Erreur collecte compétences:', error);
+        showNotification(`Erreur: ${error.message}`, 'error');
     }
-
-    const existingData = await chrome.storage.local.get('profile');
-    const profileData = {
-        ...existingData.profile,
-        timestamp: new Date().toISOString(),
-        type: 'profile',
-        skills: skills
-    };
-
-    await saveToStorage('profile', profileData);
-    showNotification(`${skills.length} compétences collectées !`, 'success');
-    await loadStoredStats();
 }
 
 // ========================================
@@ -621,13 +674,19 @@ function scrapePublicationsData() {
                 const stats = { reactions: 0, comments: 0, reposts: 0 };
 
                 try {
-                    // Réactions - Sélecteurs multiples avec fallbacks
-                    let reactionsEl = post.querySelector('.social-details-social-counts__social-proof-fallback-number');
-                    if (!reactionsEl) {
-                        reactionsEl = post.querySelector('.social-details-social-counts__reactions-count');
-                    }
-                    if (!reactionsEl) {
-                        reactionsEl = post.querySelector('[aria-label*="réaction"], [aria-label*="reaction"]');
+                    // Réactions
+                    const reactionSelectors = [
+                        '.social-details-social-counts__social-proof-fallback-number',
+                        '.social-details-social-counts__reactions-count',
+                        '.social-details-social-counts__item:first-child span',
+                        '[aria-label*="réaction"] span',
+                        '[aria-label*="reaction"] span'
+                    ];
+
+                    let reactionsEl = null;
+                    for (const selector of reactionSelectors) {
+                        reactionsEl = post.querySelector(selector);
+                        if (reactionsEl && reactionsEl.textContent.match(/\d/)) break;
                     }
 
                     if (reactionsEl) {
@@ -638,26 +697,18 @@ function scrapePublicationsData() {
                         }
                     }
 
-                    // Commentaires - Sélecteurs améliorés
-                    let commentsEl = post.querySelector('.social-details-social-counts__comments');
-                    if (!commentsEl) {
-                        commentsEl = post.querySelector('[aria-label*="commentaire"], [aria-label*="comment"]');
-                    }
-                    if (!commentsEl) {
-                        // Fallback vers le texte contenant "commentaire"
-                        const socialDetails = post.querySelector('.social-details-social-counts');
-                        if (socialDetails) {
-                            const spans = socialDetails.querySelectorAll('span');
-                            spans.forEach(span => {
-                                const text = span.textContent.toLowerCase();
-                                if (text.includes('commentaire') || text.includes('comment')) {
-                                    const match = span.textContent.match(/(\d[\d\s,\.]*)/);
-                                    if (match && !commentsEl) {
-                                        commentsEl = span;
-                                    }
-                                }
-                            });
-                        }
+                    // Commentaires
+                    const commentSelectors = [
+                        '.social-details-social-counts__comments',
+                        '.social-details-social-counts__item:nth-child(2) span',
+                        '[aria-label*="commentaire"] span',
+                        '[aria-label*="comment"] span'
+                    ];
+
+                    let commentsEl = null;
+                    for (const selector of commentSelectors) {
+                        commentsEl = post.querySelector(selector);
+                        if (commentsEl && commentsEl.textContent.match(/\d/)) break;
                     }
 
                     if (commentsEl) {
@@ -668,7 +719,7 @@ function scrapePublicationsData() {
                         }
                     }
 
-                    // Republications - Logique améliorée
+                    // Republications
                     const nonReactionDetails = post.querySelector('[data-non-reaction-details]');
                     if (nonReactionDetails) {
                         const listItems = nonReactionDetails.querySelectorAll('li');
@@ -905,3 +956,40 @@ async function addPublicationManually(e) {
     e.preventDefault();
     showNotification('Fonctionnalité à implémenter', 'info');
 }
+
+// Fonction debug pour inspecter le storage
+async function debugStorage() {
+    try {
+        const data = await chrome.storage.local.get(null);
+        console.log('📊 Debug Storage:', data);
+
+        if (data.publications) {
+            console.log('📝 Publications sample:', data.publications.slice(0, 2));
+
+            // Vérifier les stats
+            data.publications.forEach((pub, index) => {
+                if (index < 3) { // Premier 3 posts seulement
+                    console.log(`Post ${index}:`, {
+                        urn: pub.urn,
+                        stats: pub.stats,
+                        reactions: pub.stats?.reactions,
+                        comments: pub.stats?.comments,
+                        reposts: pub.stats?.reposts
+                    });
+                }
+            });
+        }
+
+        return data;
+    } catch (error) {
+        console.error('Erreur debug storage:', error);
+    }
+}
+
+// À appeler dans setupEventListeners()
+// Ajouter un listener pour la combinaison Ctrl+Shift+D
+document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && e.shiftKey && e.key === 'D') {
+        debugStorage();
+    }
+});

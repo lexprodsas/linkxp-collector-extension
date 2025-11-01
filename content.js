@@ -23,21 +23,6 @@ function startTracking() {
     chrome.runtime.onMessage.addListener(handleMessage);
 }
 
-function parseLinkedInNumber(str) {
-    if (!str) return 0;
-
-    const cleaned = str.replace(/\s/g, '').replace(',', '.');
-
-    if (cleaned.includes('k') || cleaned.includes('K')) {
-        return Math.round(parseFloat(cleaned) * 1000);
-    }
-    if (cleaned.includes('M')) {
-        return Math.round(parseFloat(cleaned) * 1000000);
-    }
-
-    return parseInt(cleaned.replace(/[^\d]/g, '')) || 0;
-}
-
 
 function checkForAutoCollection() {
     if (window.location.href.includes('/details/skills/')) {

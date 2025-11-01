@@ -54,8 +54,7 @@ class BackgroundLinkXPAuth {
     // Étape 2
     async saveTokensFromWeb(tokens) {
         try {
-            // Calculer l'expiration (15 minutes par défaut)
-            const expiresAt = Date.now() + (15 * 60 * 1000);
+            const expiresAt = Date.now() + (7 * 60 * 60 * 1000); // 7 heures
 
             await chrome.storage.local.set({
                 [this.storageKeys.accessToken]: tokens.access_token,
@@ -203,7 +202,7 @@ class BackgroundLinkXPAuth {
 
     // Méthodes utilitaires (storage, tokens, etc.)
     async saveTokens(tokens) {
-        const expiresAt = Date.now() + (tokens.expires_in * 1000);
+        const expiresAt = Date.now() + (7 * 60 * 60 * 1000); // 7 heures fixe
 
         await chrome.storage.local.set({
             [this.storageKeys.accessToken]: tokens.access_token,
