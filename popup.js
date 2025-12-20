@@ -215,6 +215,7 @@ async function syncToAPI() {
 function setupEventListeners() {
     getProfileBtn.addEventListener('click', collectFollowersOnly);
     getSkillsBtn.addEventListener('click', collectSkillsOnly);
+    getPublicationsBtn.addEventListener('click', collectPublications);
     addPublicationForm.addEventListener('submit', addPublicationManually);
 
     linkAccountBtn.addEventListener('click', linkAccount);
@@ -542,27 +543,40 @@ async function collectPublications() {
     try {
         setButtonLoading(getPublicationsBtn, true);
 
-        const tab = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (!tab[0].url.includes('linkedin.com')) {
-            showNotification('Veuillez ouvrir LinkedIn', 'error');
+        // 1) Vérifier l'authentification LinkXP
+        const auth = await sendMessageToBackground('checkAuthStatus');
+        // sendMessageToBackground renvoie response.data => { isLinked: true/false }
+        const isLinked = !!auth?.isLinked;
+
+        if (!isLinked) {
+            showNotification('Vous devez vous connecter à LinkXP avant de collecter les publications.', 'warning');
             return;
         }
 
-        const isOnActivityPage = tab[0].url.includes('recent-activity/all');
+        // 2) Vérifier l'onglet actif LinkedIn
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab || !tab.url.includes('linkedin.com')) {
+            showNotification('Ouvrez LinkedIn pour collecter vos publications.', 'error');
+            return;
+        }
 
+        const isOnActivityPage = tab.url.includes('/recent-activity/all/');
+
+        // 3) Lancer la collecte réelle
         if (isOnActivityPage) {
-            await performPublicationsCollection(tab[0].id);
+            await performPublicationsCollection(tab.id);
         } else {
-            await redirectToActivityPageAndCollect(tab[0]);
+            await redirectToActivityPageAndCollect(tab);
         }
 
     } catch (error) {
         console.error('Erreur collecte publications:', error);
-        showNotification(`Erreur: ${error.message}`, 'error');
+        showNotification('Erreur: ' + error.message, 'error');
     } finally {
         setButtonLoading(getPublicationsBtn, false);
     }
 }
+
 
 async function redirectToActivityPageAndCollect(tab) {
     const profileMatch = tab.url.match(/linkedin\.com\/in\/([^\/\?]+)/);
