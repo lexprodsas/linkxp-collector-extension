@@ -218,7 +218,7 @@ function setupEventListeners() {
     addPublicationForm.addEventListener('submit', addPublicationManually);
 
     linkAccountBtn.addEventListener('click', linkAccount);
-    syncApiBtn.addEventListener('click', syncToAPI);
+    // syncApiBtn.addEventListener('click', syncToAPI); // TODO
 }
 
 async function updateAuthStatus() {
@@ -271,6 +271,16 @@ async function performFollowersCollection(tabId) {
     if (!followersData) {
         showNotification('Erreur lors de la collecte des abonnés', 'error');
         return;
+    }
+
+    const profile = {
+        followers: followersData.followers,
+        collectedAt: followersData.collectedAt,
+    };
+    await chrome.storage.local.set({ profile });
+
+    if (typeof loadStoredStats === 'function') {
+        await loadStoredStats();
     }
 
     // Envoyer UNIQUEMENT les abonnés à l'API
@@ -658,6 +668,8 @@ async function performPublicationsCollection(tabId) {
         showNotification(`${publications.length} publications collectées localement.`, 'warning');
         console.error('Erreur sync API publications:', syncError);
     }
+
+    console.log('performPublicationsCollection')
 
     await loadStoredStats();
 }
