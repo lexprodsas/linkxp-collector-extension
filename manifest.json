@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LinkXP - LinkedIn stats collector",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Collecte automatique des statistiques LinkedIn pour LinkXP",
 
   "permissions": [

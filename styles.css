@@ -116,12 +116,20 @@ h2 {
     transform: translateY(-1px);
 }
 
-.btn-secondary {
+
+.btn.btn-secondary {
     background: var(--secondary);
     color: var(--text);
     border: 1px solid var(--border);
 }
-
+.btn.btn-secondary:hover:not(:disabled) {
+    background: #545b62;
+}
+.btn.btn-secondary:disabled {
+    background: var(--text-light);
+    color: var(--text);
+    border: 1px solid var(--border);
+}
 .btn-secondary:hover:not(:disabled) {
     background: #e9ecef;
 }
@@ -130,14 +138,7 @@ h2 {
     padding: 8px 12px;
     font-size: 13px;
     width: auto;
-    margin: 0;
-    margin-left: 8px;
-}
-
-.btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-    transform: none !important;
+    margin: 0 0 0 8px;
 }
 
 .btn.loading {
@@ -275,36 +276,46 @@ h2 {
     position: fixed;
     top: 16px;
     right: 16px;
-    padding: 12px 16px;
-    border-radius: var(--radius);
+    padding: 12px 20px;
+    border-radius: 8px;
     color: white;
     font-size: 14px;
     font-weight: 500;
-    z-index: 1000;
-    animation: slideIn 0.3s ease;
-    max-width: 300px;
+    z-index: 9999;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    animation: slideIn 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    max-width: 320px;
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
 }
-
 .notification.success {
-    background: var(--success);
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    box-shadow: 0 8px 32px rgba(16, 185, 129, 0.4);
 }
 
 .notification.error {
-    background: var(--error);
+    background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+    box-shadow: 0 8px 32px rgba(239, 68, 68, 0.4);
 }
 
 .notification.warning {
-    background: var(--warning);
+    background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+    box-shadow: 0 8px 32px rgba(245, 158, 11, 0.4);
+}
+
+.notification.info {
+    background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+    box-shadow: 0 8px 32px rgba(59, 130, 246, 0.4);
 }
 
 @keyframes slideIn {
-    from {
-        transform: translateX(100%);
+    0% {
         opacity: 0;
+        transform: translateX(100%) translateY(-50%);
     }
-    to {
-        transform: translateX(0);
+    100% {
         opacity: 1;
+        transform: translateX(0) translateY(-50%);
     }
 }
 
@@ -375,16 +386,7 @@ h2 {
 }
 
 .btn:disabled {
-    opacity: 0.5;
     cursor: not-allowed;
-    background: #6c757d !important;
-}
-
-.btn.btn-secondary {
-    background: #6c757d;
-    color: white;
-}
-
-.btn.btn-secondary:hover:not(:disabled) {
-    background: #545b62;
+    background: rgba(108, 117, 125, 0.5) !important;
+    color: black !important;
 }

@@ -69,7 +69,7 @@ function injectTrackButtons() {
     });
 }
 
-function createTrackButton(postElement) {
+function createTrackButton() {
     const button = document.createElement('button');
     button.className = BUTTON_CLASS;
     button.innerHTML = '📊 Suivre';

@@ -56,7 +56,6 @@ function parseLinkedInNumber(str) {
     return parseInt(cleaned.replace(/[^\d]/g, '')) || 0;
 }
 
-
 async function linkAccount() {
     try {
         const result = await sendMessageToBackground('checkAuthStatus');
@@ -94,7 +93,6 @@ async function linkAccount() {
         setButtonLoading(linkAccountBtn, false);
     }
 }
-
 
 async function syncProfileToAPI(accessToken, profileData) {
     const payload = {
@@ -251,17 +249,77 @@ async function updateAuthStatus() {
     }
 }
 
-document.addEventListener('DOMContentLoaded', async () => {
-    await loadStoredStats();
-    await updateAuthStatus();
-    setupEventListeners();
-});
+/**
+ * ediriger vers /in/me et récupérer l'alias
+ * @param tabId
+ * @returns {Promise<unknown>}
+ */
+async function redirectToProfileAndGetAlias(tabId) {
+    showNotification('Récupération de votre profil...', 'info');
+    await chrome.tabs.update(tabId, { url: 'https://www.linkedin.com/in/me' });
 
+    // Attendre que LinkedIn redirige vers le profil réel
+    return new Promise((resolve) => {
+        let attempts = 0;
+        const maxAttempts = 20;
+
+        const checkRedirect = async () => {
+            attempts++;
+
+            try {
+                const results = await chrome.scripting.executeScript({
+                    target: { tabId },
+                    func: () => {
+                        const aliasMatch = window.location.href.match(/\/in\/([^/?\#]+)/);
+                        const currentAlias = aliasMatch ? aliasMatch[1] : null;
+
+                        // Si on n'est plus sur /in/me, la redirection est faite
+                        return {
+                            alias: currentAlias !== 'me' ? currentAlias : null
+                        };
+                    }
+                });
+
+                const { alias } = results[0].result;
+
+                if (alias) {
+                    // Stocker l'alias
+                    await chrome.storage.local.set({ userAlias: alias });
+                    showNotification('Profil détecté !', 'success');
+                    resolve(alias);
+                    return;
+                }
+
+                if (attempts < maxAttempts) {
+                    setTimeout(checkRedirect, 500);
+                } else {
+                    showNotification('Erreur: Impossible de récupérer votre profil', 'error');
+                    resolve(null);
+                }
+
+            } catch (error) {
+                if (attempts < maxAttempts) {
+                    setTimeout(checkRedirect, 500);
+                } else {
+                    showNotification('Erreur de redirection', 'error');
+                    resolve(null);
+                }
+            }
+        };
+
+        checkRedirect();
+    });
+}
 
 // ========================================
 // 2. COLLECTE PROFIL (ABONNÉS + COMPÉTENCES)
 // ========================================
 
+/**
+ * Collect des abonnés
+ * @param tabId
+ * @returns {Promise<void>}
+ */
 async function performFollowersCollection(tabId) {
     const results = await chrome.scripting.executeScript({
         target: { tabId },
@@ -280,6 +338,7 @@ async function performFollowersCollection(tabId) {
     };
     await chrome.storage.local.set({ profile });
 
+    console.log('DEBUG 1 => performFollowersCollection');
     if (typeof loadStoredStats === 'function') {
         await loadStoredStats();
     }
@@ -287,7 +346,11 @@ async function performFollowersCollection(tabId) {
     // Envoyer UNIQUEMENT les abonnés à l'API
     try {
         await sendMessageToBackground('syncFollowers', followersData);
-        showNotification(`${followersData.followers} abonnés synchronisés !`, 'success');
+        if (followersData.followers) {
+            showNotification(`${followersData.followers} abonnés synchronisés !`, 'success');
+        } else {
+            showNotification(`Vous êtes à jour !`, 'success');
+        }
     } catch (syncError) {
         showNotification('Erreur sync API abonnés', 'error');
         console.error('Erreur sync API:', syncError);
@@ -297,48 +360,71 @@ async function waitForProfileLoadThenCollect(tabId) {
     let attempts = 0;
     const maxAttempts = 15;
 
-    const checkPageAndCollect = async () => {
-        attempts++;
+    try {
+        // Vérifier d'abord si l'alias est en storage
+        const storedData = await chrome.storage.local.get(['userAlias']);
+        let userAlias = storedData.userAlias;
 
-        try {
-            const results = await chrome.scripting.executeScript({
-                target: { tabId },
-                func: () => {
-                    const isProfilePage = window.location.href.includes('linkedin.com/in/');
-                    const hasFollowers = document.querySelector('.ember-view.link-without-visited-state .t-bold') !== null;
-                    const isLoaded = isProfilePage && hasFollowers;
-
-                    return { isLoaded, isProfilePage, hasFollowers };
-                }
-            });
-
-            const result = results[0].result;
-
-            if (result.isLoaded) {
-                showNotification('Profil chargé ! Collecte des abonnés...', 'success');
-                await performFollowersCollection(tabId);
-                return;
-            }
-
-            if (attempts < maxAttempts) {
-                showNotification(`Chargement... ${attempts}/${maxAttempts}`, 'info');
-                setTimeout(checkPageAndCollect, 2000);
-            } else {
-                showNotification('Délai dépassé. Tentative de collecte...', 'warning');
-                await performFollowersCollection(tabId);
-            }
-
-        } catch (error) {
-            if (attempts < maxAttempts) {
-                setTimeout(checkPageAndCollect, 2000);
-            } else {
-                showNotification('Erreur de chargement', 'error');
+        // Si pas d'alias, le récupérer via redirection /in/me
+        if (!userAlias) {
+            userAlias = await redirectToProfileAndGetAlias(tabId);
+            if (!userAlias) {
+                return; // Erreur déjà affichée par redirectToProfileAndGetAlias
             }
         }
-    };
 
-    setTimeout(checkPageAndCollect, 1000);
+        // Maintenant on a l'alias, attendre le chargement de recent-activity/all/
+        const checkPageAndCollect = async () => {
+            attempts++;
+
+            try {
+                const results = await chrome.scripting.executeScript({
+                    target: { tabId },
+                    func: () => {
+                        const isOnRecentActivityPage = window.location.href.includes('/recent-activity/all/');
+                        return { isOnRecentActivityPage };
+                    }
+                });
+
+                const { isOnRecentActivityPage } = results[0].result;
+
+                // Si on n'est pas sur recent-activity/all/, rediriger
+                if (!isOnRecentActivityPage) {
+                    const targetUrl = `https://www.linkedin.com/in/${userAlias}/recent-activity/all/`;
+                    showNotification('Redirection vers la page des publications...', 'info');
+                    await chrome.tabs.update(tabId, { url: targetUrl });
+
+                    // Relancer la vérification après redirection
+                    if (attempts < maxAttempts) {
+                        showNotification(`Chargement... ${attempts}/${maxAttempts}`, 'info');
+                        setTimeout(checkPageAndCollect, 2000);
+                    }
+                    return;
+                }
+
+                // On est sur la bonne page : appeler performFollowersCollection
+                showNotification('Profil chargé ! Collecte des abonnés...', 'info');
+                await performFollowersCollection(tabId);
+
+            } catch (error) {
+                console.error('Erreur:', error);
+                if (attempts < maxAttempts) {
+                    setTimeout(checkPageAndCollect, 2000);
+                } else {
+                    showNotification('Erreur de chargement', 'error');
+                }
+            }
+        };
+
+        checkPageAndCollect();
+
+    } catch (error) {
+        console.error('Erreur waitForProfileLoadThenCollect:', error);
+        showNotification('Erreur: ' + error.message, 'error');
+    }
 }
+
+
 async function redirectToProfileAndCollect(tab) {
     try {
         showNotification('Redirection vers votre profil...', 'info');
@@ -355,7 +441,13 @@ async function redirectToProfileAndCollect(tab) {
         showNotification('Erreur lors de la redirection', 'error');
     }
 }
+
+/**
+ * Récupération des informations de base du profil
+ * @returns {Promise<void>}
+ */
 async function collectFollowersOnly() {
+    // getProfileBtn Etape 1
     try {
         setButtonLoading(getProfileBtn, true);
 
@@ -366,8 +458,7 @@ async function collectFollowersOnly() {
         }
 
         const isOnProfilePage = tab[0].url.includes('linkedin.com/in/') &&
-            !tab[0].url.includes('/details/') &&
-            !tab[0].url.includes('/recent-activity/');
+            tab[0].url.includes('/recent-activity/');
 
         if (isOnProfilePage) {
             // Directement sur la page profil
@@ -384,6 +475,7 @@ async function collectFollowersOnly() {
         setButtonLoading(getProfileBtn, false);
     }
 }
+
 // Fonction pour effectuer la collecte des compétences
 async function performSkillsCollection(tabId) {
     const results = await chrome.scripting.executeScript({
@@ -406,6 +498,7 @@ async function performSkillsCollection(tabId) {
         console.error('Erreur sync API:', syncError);
     }
 }
+
 // Fonction pour attendre le chargement de la page des compétences
 async function waitForSkillsPageThenCollect(tabId) {
     let attempts = 0;
@@ -464,6 +557,7 @@ async function waitForSkillsPageThenCollect(tabId) {
 
     setTimeout(checkPageAndCollect, 1000);
 }
+
 async function redirectToSkillsPageAndCollect(tab) {
     try {
         // Détecter le profil utilisateur depuis l'URL ou le DOM
@@ -683,8 +777,7 @@ async function performPublicationsCollection(tabId) {
         console.error('Erreur sync API publications:', syncError);
     }
 
-    console.log('performPublicationsCollection')
-
+    console.log('DEBUG 2 => performPublicationsCollection');
     await loadStoredStats();
 }
 
@@ -718,16 +811,25 @@ function scrollToLoadAllSkills() {
     });
 }
 
+/**
+ * Scrape le nombre de follower
+ * @returns {{followers: number, collectedAt: string}|null}
+ */
 function scrapeFollowersOnly() {
     try {
-        const followersElement = document.querySelector('.ember-view.link-without-visited-state .t-bold');
+        const followersElement = document.querySelector('aside .link-without-visited-state')
         let followers = 0;
 
         if (followersElement) {
             const text = followersElement.textContent.trim();
-            const match = text.match(/(\d+[\d\s,]*)/);
-            if (match) {
-                followers = parseInt(match[1].replace(/[\s,]/g, ''), 10) || 0;
+
+            if (typeof text === 'string') {
+                followers = +text
+            } else {
+                const match = text.match(/(\d+[\d\s,]*)/);
+                if (match) {
+                    followers = parseInt(match[1].replace(/[\s,]/g, ''), 10) || 0;
+                }
             }
         }
 
@@ -1078,6 +1180,7 @@ async function loadStoredStats() {
             return;
         }
 
+        console.log('loadStoredStats', data);
 
         if (data.profile) {
             const profileCard = createStatCard('Profil', data.profile);
@@ -1101,7 +1204,6 @@ function createStatCard(type, data) {
     let content = `
     <div class="stat-header">
       <span class="stat-type">${type}</span>
-      <span class="stat-time">${new Date(data.timestamp).toLocaleString('fr-FR')}</span>
     </div>
     <div class="stat-content">`;
 
@@ -1128,7 +1230,7 @@ function createStatCard(type, data) {
             }, { reactions: 0, comments: 0, reposts: 0 });
 
             content += `
-              <p><strong>Total:</strong> ${data.length} publications</p>
+              <p><strong>Total:</strong> ${data.length} publications collectées</p>
               <p><strong>Originales:</strong> ${originalPosts}</p>
               <p><strong>Republications:</strong> ${reposts}</p>
               <p><strong>👍 Réactions totales:</strong> ${totalStats.reactions}</p>
@@ -1141,7 +1243,7 @@ function createStatCard(type, data) {
             if (recentPosts.length > 0) {
                 content += `<p><strong>Publications récentes:</strong></p>`;
                 recentPosts.forEach((post, i) => {
-                    const shortUrn = post.urn ? post.urn.split(':').pop().substring(0, 8) + '...' : 'N/A';
+                    const shortUrn = post.urn ? post.urn.split(':').pop().substring(0, 20) + '...' : 'N/A';
 
                     // Formater publishedDate au lieu de rawDateText
                     const publishedDate = post.publishedDate ?
@@ -1151,7 +1253,7 @@ function createStatCard(type, data) {
                             year: 'numeric'
                         }) : 'Date inconnue';
 
-                    content += `<p style="font-size:12px; margin-left:10px;">• ${shortUrn} (${publishedDate})</p>`;
+                    content += `<p style="font-size:12px; margin-left:10px;">• Le ${publishedDate} (ID : ${shortUrn})</p>`;
                 });
                 if (data.length > 3) {
                     content += `<p style="font-size:12px; margin-left:10px; color: #666;">• ... et ${data.length - 3} autres publications</p>`;
@@ -1229,6 +1331,12 @@ async function debugStorage() {
         console.error('Erreur debug storage:', error);
     }
 }
+
+document.addEventListener('DOMContentLoaded', async () => {
+    await loadStoredStats();
+    await updateAuthStatus();
+    setupEventListeners();
+});
 
 // À appeler dans setupEventListeners()
 // Ajouter un listener pour la combinaison Ctrl+Shift+D
