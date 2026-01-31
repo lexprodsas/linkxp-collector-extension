@@ -633,6 +633,10 @@ async function collectSkillsOnly() {
 // 3. COLLECTE PUBLICATIONS
 // ========================================
 
+/**
+ * Collect des publications
+ * @returns {Promise<void>}
+ */
 async function collectPublications() {
     try {
         setButtonLoading(getPublicationsBtn, true);
@@ -673,6 +677,7 @@ async function collectPublications() {
 
 
 async function redirectToActivityPageAndCollect(tab) {
+    // TODO cette fonction n'est-elle pas un doublon ?
     const profileMatch = tab.url.match(/linkedin\.com\/in\/([^\/\?]+)/);
     if (!profileMatch) {
         try {
@@ -910,6 +915,10 @@ function scrapeSkillsData() {
     }
 }
 
+/**
+ * Scrapper des publications
+ * @returns {*[]}
+ */
 function scrapePublicationsData() {
 
     // Fonction parseLinkedInNumber directement dans le contexte injecté
@@ -931,10 +940,15 @@ function scrapePublicationsData() {
     const publications = [];
 
     try {
+        // aria-live="polite" => donne le nombre de publications chargés sur la page
+        // .scaffold-finite-scroll__load-button + son parent direct => correspond au bouton pour charger plus d'éléments
+        /*
+         Dans l'ajax qui récupères les posts, il y a une clé qui m'intrigue : "shareUrn": "urn:li:share:7363971949728784386",
+         N'est-elle pas celle pour l'API ? à tester
+         */
         const postElements = document.querySelectorAll('.feed-shared-update-v2');
 
         postElements.forEach((post, index) => {
-            if (index >= 20) return;
 
             const dataUrn = post.getAttribute('data-urn');
             if (!dataUrn) {
