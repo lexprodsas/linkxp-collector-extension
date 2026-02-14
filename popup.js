@@ -21,41 +21,6 @@ async function sendMessageToBackground(action, data = {}) {
     });
 }
 
-// Fonction utilitaire pour attendre la fermeture d'un onglet
-function waitForTabClosure(tabId) {
-    return new Promise((resolve) => {
-        const checkClosed = () => {
-            chrome.tabs.get(tabId, (tab) => {
-                if (chrome.runtime.lastError) {
-                    // L'onglet a été fermé (erreur = tab not found)
-                    resolve(true);
-                } else {
-                    // L'onglet existe encore, vérifier à nouveau dans 1 seconde
-                    setTimeout(checkClosed, 1000);
-                }
-            });
-        };
-
-        // Commencer à vérifier après 2 secondes (laisser le temps à l'onglet de s'ouvrir)
-        setTimeout(checkClosed, 2000);
-    });
-}
-
-function parseLinkedInNumber(str) {
-    if (!str) return 0;
-
-    const cleaned = str.replace(/\s/g, '').replace(',', '.');
-
-    if (cleaned.includes('k') || cleaned.includes('K')) {
-        return Math.round(parseFloat(cleaned) * 1000);
-    }
-    if (cleaned.includes('M')) {
-        return Math.round(parseFloat(cleaned) * 1000000);
-    }
-
-    return parseInt(cleaned.replace(/[^\d]/g, '')) || 0;
-}
-
 async function linkAccount() {
     try {
         const result = await sendMessageToBackground('checkAuthStatus');
@@ -782,7 +747,6 @@ async function performPublicationsCollection(tabId) {
         console.error('Erreur sync API publications:', syncError);
     }
 
-    console.log('DEBUG 2 => performPublicationsCollection');
     await loadStoredStats();
 }
 
@@ -848,35 +812,6 @@ function scrapeFollowersOnly() {
     }
 }
 
-function scrapeProfileData() {
-    const data = {
-        timestamp: new Date().toISOString(),
-        type: 'profile',
-        followers: 0,
-        skills: []
-    };
-
-    try {
-        const followersElement = document.querySelector('.ember-view.link-without-visited-state .t-bold');
-        if (followersElement) {
-            const text = followersElement.textContent.trim();
-            const match = text.match(/(\d[\d\s,\.]*)\s*abonné/i) ||
-                text.match(/(\d[\d\s,\.]*)\s*follower/i) ||
-                text.match(/(\d[\d\s,\.]*)\s*connexion/i) ||
-                text.match(/(\d[\d\s,\.]*)/);
-
-            if (match) {
-                data.followers = parseInt(match[1].replace(/[\s,\.]/g, '')) || 0;
-            }
-        }
-
-        return data;
-    } catch (error) {
-        console.error('Erreur scraping profil:', error);
-        return null;
-    }
-}
-
 function scrapeSkillsData() {
     const skills = [];
 
@@ -937,6 +872,17 @@ function scrapePublicationsData() {
         return parseInt(cleaned.replace(/[^\d]/g, '')) || 0;
     };
 
+    const getPostIdString = (str) => {
+        const match = str.match(/(?<=urn:li:activity:)\d+/);
+        return match ? match[0] : null;
+    }
+    const extractTimestampFromPostId = (postId) => {
+        const asBinary = BigInt(postId).toString(2);
+        const ms = parseInt(asBinary.slice(0, 41), 2);
+        const date = new Date(ms);
+        return date.toISOString(); // "2024-02-14T12:34:15.893Z"
+    };
+
     const publications = [];
 
     try {
@@ -946,12 +892,14 @@ function scrapePublicationsData() {
          Dans l'ajax qui récupères les posts, il y a une clé qui m'intrigue : "shareUrn": "urn:li:share:7363971949728784386",
          N'est-elle pas celle pour l'API ? à tester
          */
-        const postElements = document.querySelectorAll('.feed-shared-update-v2');
+        // #profile-content .scaffold-layout .scaffold-finite-scroll__content > ul
+        const postElements = document.querySelectorAll('#profile-content .scaffold-layout .scaffold-finite-scroll__content > ul > li');
 
         postElements.forEach((post, index) => {
 
-            const dataUrn = post.getAttribute('data-urn');
+            const dataUrn = post.querySelector('[data-urn]')?.getAttribute('data-urn');
             if (!dataUrn) {
+                // TODO ajouter ici un catch pour identifier un problème de collect
                 return; // Ignorer si pas d'URN
             }
 
@@ -964,75 +912,19 @@ function scrapePublicationsData() {
                 isRepost = headerText.includes('a republié ceci') ||
                     headerText.includes('has reposted this') ||
                     headerText.includes('reposted this');
-
             }
 
             // Date de publication avec sélecteur spécifique
-            const dateElement = post.querySelector('.update-components-actor__container .update-components-actor__meta .update-components-actor__sub-description > span:first-child');
-            let publicationDate = new Date().toISOString();
-            let rawDateText = '';
+            const postID = getPostIdString(dataUrn);
+            const publicationDate = extractTimestampFromPostId(postID);
 
-            if (dateElement) {
-                rawDateText = dateElement.textContent.trim();
-
-                // Nettoyer le texte (supprimer les "•", "Modifié", etc.)
-                const cleanText = rawDateText.replace(/•.*$/, '').trim(); // Tout supprimer après le premier •
-                const now = new Date();
-                // Patterns de reconnaissance
-                if (cleanText.match(/^\d+\s*min?\.?$/)) {
-                    // "5 min", "30 min."
-                    const minutes = parseInt(cleanText.match(/\d+/)[0]);
-                    const date = new Date(now.getTime() - (minutes * 60 * 1000));
-                    publicationDate = date.toISOString();
-                }
-
-                if (cleanText.match(/^\d+\s*h\.?$/)) {
-                    // "2 h", "5 h."
-                    const hours = parseInt(cleanText.match(/\d+/)[0]);
-                    const date = new Date(now.getTime() - (hours * 60 * 60 * 1000));
-                    publicationDate = date.toISOString();
-                }
-
-                if (cleanText.match(/^\d+\s*j\.?$/)) {
-                    // "3 j", "1 j."
-                    const days = parseInt(cleanText.match(/\d+/)[0]);
-                    const date = new Date(now.getTime() - (days * 24 * 60 * 60 * 1000));
-                    publicationDate = date.toISOString();
-                }
-
-                if (cleanText.match(/^\d+\s*sem\.?$/)) {
-                    // "1 sem", "2 sem."
-                    const weeks = parseInt(cleanText.match(/\d+/)[0]);
-                    const date = new Date(now.getTime() - (weeks * 7 * 24 * 60 * 60 * 1000));
-                    publicationDate = date.toISOString();
-                }
-
-                if (cleanText.match(/^\d+\s*mois\.?$/)) {
-                    // "1 mois", "3 mois."
-                    const months = parseInt(cleanText.match(/\d+/)[0]);
-                    const date = new Date(now.getFullYear(), now.getMonth() - months, now.getDate());
-                    publicationDate = date.toISOString();
-                }
-
-                if (cleanText.match(/^\d+\s*ans?\.?$/)) {
-                    // "1 an", "2 ans"
-                    const years = parseInt(cleanText.match(/\d+/)[0]);
-                    const date = new Date(now.getFullYear() - years, now.getMonth(), now.getDate());
-                    publicationDate = date.toISOString();
-                }
-            }
-
-            // Texte de la publication (inchangé)
+            // Texte de la publication)
             const textElement = post.querySelector('.feed-shared-update-v2__description, .break-words');
-            const postText = textElement ? textElement.textContent.trim().substring(0, 300) : '';
-
-            // Auteur de la publication (inchangé)
-            const authorElement = post.querySelector('.feed-shared-actor__name, .update-components-actor__name');
-            const authorName = authorElement ? authorElement.textContent.trim() : '';
+            const postText = textElement ? textElement.textContent.trim() : '';
 
             // Stats (utilise la fonction améliorée)
             function extractPostStats(post) {
-                const stats = { reactions: 0, comments: 0, reposts: 0 };
+                const stats = { reactions: 0, comments: 0, reposts: 0, impressions: 0, };
 
                 try {
                     // Réactions
@@ -1079,6 +971,26 @@ function scrapePublicationsData() {
                             stats.comments = parseLinkedInNumber(match[1]);
                         }
                     }
+
+                    // Impression
+                    const impressionSelectors = [
+                        '.analytics-entry-point .ca-entry-point__num-views:not(.link)',
+                    ];
+
+                    let impressionEl = null;
+                    for (const selector of impressionSelectors) {
+                        impressionEl = post.querySelector(selector);
+                        if (impressionEl && impressionEl.textContent.match(/\d/)) break;
+                    }
+
+                    if (impressionEl) {
+                        const text = impressionEl.textContent.trim();
+                        const match = text.match(/(\d[\d\s,\.]*)/);
+                        if (match) {
+                            stats.impressions = parseLinkedInNumber(match[1]);
+                        }
+                    }
+
 
                     // Republications
                     const nonReactionDetails = post.querySelector('[data-non-reaction-details]');
@@ -1137,16 +1049,14 @@ function scrapePublicationsData() {
             }
 
             const stats = extractPostStats(post);
+
             publications.push({
                 id: dataUrn, // URN complet
-                urn: dataUrn, // Alias pour clarté
-                text: postText,
-                author: authorName,
-                type: isRepost ? 'repost' : 'original',
-                publishedDate: publicationDate, // Remplace timestamp
-                rawDateText: rawDateText, // Garder le texte original pour debug
-                collectedAt: new Date().toISOString(), // Moment de la collecte
-                stats: stats
+                urn: dataUrn, // API ok
+                text: postText, // API ok
+                type: isRepost ? 'repost' : 'original', // API ok
+                publishedDate: publicationDate,  // API ok
+                stats: stats // API ok
             });
         });
 

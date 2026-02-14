@@ -62,8 +62,6 @@ class BackgroundLinkXPAuth {
                 [this.storageKeys.deviceId]: tokens.device_id,
                 [this.storageKeys.tokenExpires]: expiresAt
             });
-
-            console.log('✅ Tokens web sauvegardés');
         } catch (error) {
             console.error('Erreur sauvegarde tokens web:', error);
         }
@@ -147,8 +145,8 @@ class BackgroundLinkXPAuth {
             publishedDate: pub.publishedDate || pub.timestamp || new Date().toISOString(),
             reactions: pub.stats?.reactions || 0,
             comments: pub.stats?.comments || 0,
-            reposts: pub.isRepost || false,
-            impressions: 0, // Non disponible dans le scraping LinkedIn
+            reposts: pub.stats.reposts || 0,
+            impressions: pub.stats?.impressions || 0,
             type: pub.type || (pub.isRepost ? 'repost' : 'original'),
             hasMedia: false, // Non détecté actuellement
             tstamp: pub.collectedAt || pub.timestamp || new Date().toISOString(),
@@ -199,15 +197,6 @@ class BackgroundLinkXPAuth {
     async isTokenValid() {
         const tokens = await this.getStoredTokens();
 
-        // DEBUG TEMPORAIRE
-        console.log('🔍 Debug tokens:', {
-            hasAccessToken: !!tokens.accessToken,
-            hasExpiresAt: !!tokens.expiresAt,
-            expiresAt: tokens.expiresAt,
-            now: Date.now(),
-            isValid: tokens.expiresAt > (Date.now() + 120000)
-        });
-
         if (!tokens.accessToken || !tokens.expiresAt) {
             return false;
         }
@@ -243,9 +232,6 @@ class BackgroundLinkXPAuth {
     // Ajouter ces nouvelles méthodes dans la classe BackgroundLinkXPAuth
     async syncFollowers(followersData) {
         const accessToken = await this.getValidAccessToken();
-
-        console.log('syncFollowers', followersData)
-
         const payload = {
             followers: followersData.followers,
             collectedAt: followersData.collectedAt
@@ -295,9 +281,6 @@ class BackgroundLinkXPAuth {
 }
 
 const backgroundAuth = new BackgroundLinkXPAuth();
-
-
-console.log('LinkXP Background Service Worker started');
 
 // Installation de l'extension
 chrome.runtime.onInstalled.addListener((details) => {
