@@ -1,3 +1,5 @@
+importScripts('collector.js');
+
 class BackgroundLinkXPAuth {
     constructor() {
         this.apiBaseUrl = 'https://app.linkxp.net/api/v1';
@@ -135,34 +137,28 @@ class BackgroundLinkXPAuth {
         }
     }
 
-    // Synchroniser les publications
-    async syncPublications(publications) {
+    // Appel authentifié à l'API LinkXP (une nouvelle tentative après 60 s si la limite de débit est atteinte)
+    async apiRequest(method, endpoint, body = null, retryOn429 = true) {
         const accessToken = await this.getValidAccessToken();
-
-        const formattedPublications = publications.map(pub => ({
-            urn: pub.urn,
-            text: pub.text || '',
-            publishedDate: pub.publishedDate || pub.timestamp || new Date().toISOString(),
-            reactions: pub.stats?.reactions || 0,
-            comments: pub.stats?.comments || 0,
-            reposts: pub.stats.reposts || 0,
-            impressions: pub.stats?.impressions || 0,
-            type: pub.type || (pub.isRepost ? 'repost' : 'original'),
-            hasMedia: false, // Non détecté actuellement
-            tstamp: pub.collectedAt || pub.timestamp || new Date().toISOString(),
-        }));
-
-        const response = await fetch(this.getFullUrl('/linkedin/publications'), {
-            method: 'POST',
+        const options = {
+            method,
             headers: {
                 'Authorization': `Bearer ${accessToken}`,
                 'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(formattedPublications)
-        });
+            }
+        };
+        if (body !== null) {
+            options.body = JSON.stringify(body);
+        }
 
+        const response = await fetch(this.getFullUrl(endpoint), options);
+
+        if (response.status === 429 && retryOn429) {
+            await new Promise(resolve => setTimeout(resolve, 61000));
+            return this.apiRequest(method, endpoint, body, false);
+        }
         if (!response.ok) {
-            const error = await response.json();
+            const error = await response.json().catch(() => ({}));
             throw new Error(error.message || `Erreur ${response.status}`);
         }
 
@@ -229,31 +225,6 @@ class BackgroundLinkXPAuth {
         return await this.isTokenValid();
     }
 
-    // Ajouter ces nouvelles méthodes dans la classe BackgroundLinkXPAuth
-    async syncFollowers(followersData) {
-        const accessToken = await this.getValidAccessToken();
-        const payload = {
-            followers: followersData.followers,
-            collectedAt: followersData.collectedAt
-        };
-
-        const response = await fetch(this.getFullUrl('/linkedin/profile'), {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${accessToken}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(payload)
-        });
-
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.message || `Erreur ${response.status}`);
-        }
-
-        return await response.json();
-    }
-
     async syncSkills(skills) {
         const accessToken = await this.getValidAccessToken();
 
@@ -287,17 +258,6 @@ chrome.runtime.onInstalled.addListener((details) => {
     if (details.reason === 'install') {
         console.log('LinkXP installé avec succès !');
 
-        // Initialiser le storage
-        chrome.storage.local.set({
-            trackedPosts: [],
-            profile: null,
-            publications: [],
-            settings: {
-                apiUrl: 'https://app.linkxp.net/api/v1',
-                apiKey: '',
-                autoSync: false
-            }
-        });
     }
 
     if (details.reason === 'update') {
@@ -313,12 +273,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         try {
 
             switch (request.action) {
-                case 'syncToAPI':
-                    syncDataToAPI(request.data)
-                        .then(result => sendResponse({ success: true, result }))
-                        .catch(error => sendResponse({ success: false, error: error.message }));
-                    return true; // Permet les réponses asynchrones
-
                 case 'getStoredData':
                     chrome.storage.local.get(null, (data) => {
                         sendResponse({ success: true, data });
@@ -351,14 +305,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     sendResponse({ success: true });
                     return;
 
-                case 'syncPublications':
-                    const pubResult = await backgroundAuth.syncPublications(request.publications);
-                    sendResponse({ success: true, data: pubResult });
-                    break;
-
-                case 'syncFollowers':
-                    const followersResult = await backgroundAuth.syncFollowers(request);
-                    sendResponse({ success: true, data: followersResult });
+                case 'startCollection':
+                    // Répond tout de suite : la collecte dure plusieurs minutes et continue popup fermée
+                    sendResponse({ success: true, data: { started: await startCollection() } });
                     break;
 
                 case 'syncSkills':
@@ -391,80 +340,60 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     }
 });
 
-// Synchronisation avec l'API (préparé pour le futur)
-async function syncDataToAPI(data) {
-    try {
-        // Récupérer les paramètres API
-        const settings = await chrome.storage.local.get('settings');
-        const apiUrl = settings.settings?.apiUrl;
-        const apiKey = settings.settings?.apiKey;
+// ========================================
+// Collecte des publications (voir collector.js)
+// État partagé avec la popup via chrome.storage.local.collectState
+// ========================================
 
-        if (!apiUrl) {
-            throw new Error('URL API non configurée');
-        }
+let collectionRunning = false;
 
-        // Préparer les données pour l'API
-        const payload = {
-            timestamp: new Date().toISOString(),
-            data: data
-        };
-
-        // Envoi à l'API (quand elle sera prête)
-        const response = await fetch(apiUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`
-            },
-            body: JSON.stringify(payload)
-        });
-
-        if (!response.ok) {
-            throw new Error(`Erreur API: ${response.status}`);
-        }
-
-        const result = await response.json();
-        console.log('Données synchronisées avec succès:', result);
-
-        return result;
-
-    } catch (error) {
-        console.error('Erreur synchronisation API:', error);
-        throw error;
-    }
-}
-
-// Nettoyage périodique des anciennes données (optionnel)
-chrome.alarms.create('cleanupOldData', { periodInMinutes: 1440 }); // 24h
-
-chrome.alarms.onAlarm.addListener(async (alarm) => {
-    if (alarm.name === 'cleanupOldData') {
-        await cleanupOldData();
+// Au démarrage du service worker, aucune collecte ne tourne : une collecte « en cours » a été interrompue
+chrome.storage.local.get('collectState').then(({ collectState }) => {
+    if (collectState?.running) {
+        setCollectState({ running: false, ok: false, finishedAt: Date.now(), message: 'Collecte interrompue, relancez-la.' });
     }
 });
 
-async function cleanupOldData() {
-    try {
-        const data = await chrome.storage.local.get('trackedPosts');
-        const trackedPosts = data.trackedPosts || [];
+// Écritures sérialisées : une progression tardive ne peut pas écraser l'état final
+let collectStateQueue = Promise.resolve();
 
-        // Garder uniquement les posts des 30 derniers jours
-        const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
-
-        const filteredPosts = trackedPosts.filter(post => {
-            const postDate = new Date(post.timestamp).getTime();
-            return postDate > thirtyDaysAgo;
-        });
-
-        await chrome.storage.local.set({ trackedPosts: filteredPosts });
-
-        console.log(`Nettoyage effectué: ${trackedPosts.length - filteredPosts.length} posts supprimés`);
-
-    } catch (error) {
-        console.error('Erreur nettoyage:', error);
-    }
+function setCollectState(patch) {
+    collectStateQueue = collectStateQueue.then(async () => {
+        const { collectState } = await chrome.storage.local.get('collectState');
+        await chrome.storage.local.set({ collectState: { ...(collectState || {}), ...patch } });
+    }).catch(error => console.error('Erreur état de collecte:', error));
+    return collectStateQueue;
 }
 
+async function startCollection() {
+    if (collectionRunning) {
+        return false;
+    }
+    // Rafraîchit le jeton si besoin, lève DEVICE_LINKING_REQUIRED sinon
+    await backgroundAuth.getValidAccessToken();
+
+    collectionRunning = true;
+    await chrome.storage.local.set({
+        collectState: { running: true, startedAt: Date.now(), phase: 'start', message: 'Démarrage de la collecte…' }
+    });
+
+    const collector = new LinkXPCollector(backgroundAuth, (progress) => setCollectState(progress));
+
+    collector.run()
+        .then(result => setCollectState({
+            running: false,
+            finishedAt: Date.now(),
+            ok: result.ok,
+            blocked: !!result.blocked,
+            error: result.error || null,
+            summary: result.summary,
+            message: result.ok ? 'Collecte terminée' : result.error,
+        }))
+        .catch(error => setCollectState({ running: false, finishedAt: Date.now(), ok: false, error: error.message, message: error.message }))
+        .finally(() => { collectionRunning = false; });
+
+    return true;
+}
 
 // Gestion des erreurs globales
 self.addEventListener('error', (event) => {
