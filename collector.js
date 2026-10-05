@@ -122,14 +122,21 @@ const LinkXPParsers = {
         const elementUrns = body?.data?.['*elements'] || [];
         const publications = [];
         const anomalies = new Set();
+        let anomalyTarget = null;
+        const flag = (code, urn) => {
+            anomalies.add(code);
+            anomalyTarget = anomalyTarget || urn || null;
+        };
 
         for (const elementUrn of elementUrns) {
             // Seuls les éléments de premier niveau : un post repartagé avec commentaire
             // inclut aussi l'UpdateV2 d'origine, qui n'est pas une activité du membre.
             const update = byUrn.get(elementUrn);
-            const urn = update?.updateMetadata?.urn;
+            // L'activité se lit dans l'URN de l'élément, urn:li:fs_updateV2:(urn:li:activity:<id>,…) :
+            // pour certains reposts de son propre post, updateMetadata.urn porte l'activité d'origine.
+            const urn = (elementUrn.match(/urn:li:activity:\d+/) || [])[0] || update?.updateMetadata?.urn;
             if (!update || !/^urn:li:activity:\d+$/.test(urn || '')) {
-                anomalies.add('update_unreadable');
+                flag('update_unreadable', urn);
                 continue;
             }
 
@@ -146,11 +153,11 @@ const LinkXPParsers = {
             // présent aussi quand le membre reposte son propre post ; ou ancien repartage sans commentaire.
             const isRepost = (!!actorUrn && actorUrn !== me.memberUrn) || !!update.header || (reshared && !text);
 
-            if (!counts) anomalies.add('counts_missing');
+            if (!counts) flag('counts_missing', urn);
             // Les très anciens posts n'ont pas d'impressions : seul un post récent sans impressions est suspect
             if (!isRepost && counts && typeof counts.numImpressions !== 'number'
-                && Date.now() - publishedMs < 365 * DAY_MS) anomalies.add('impressions_missing');
-            if (!isRepost && !text && !update.content) anomalies.add('empty_post');
+                && Date.now() - publishedMs < 365 * DAY_MS) flag('impressions_missing', urn);
+            if (!isRepost && !text && !update.content) flag('empty_post', urn);
 
             publications.push({
                 urn,
@@ -173,6 +180,7 @@ const LinkXPParsers = {
             paginationToken: body?.data?.metadata?.paginationToken || null,
             elementCount: elementUrns.length,
             anomalies: [...anomalies],
+            anomalyTarget,          // URN du premier post concerné
         };
     },
 
@@ -354,7 +362,7 @@ class LinkXPCollector {
 
             this.progress('inventory_sync', `Envoi de ${publications.length} publications…`);
             for (let i = 0; i < publications.length; i += LINKXP_COLLECT.API_BATCH_SIZE) {
-                await this.api.apiRequest('POST', '/linkedin/publications', publications.slice(i, i + LINKXP_COLLECT.API_BATCH_SIZE));
+                await this.savePublications(publications.slice(i, i + LINKXP_COLLECT.API_BATCH_SIZE));
             }
 
             const state = await this.api.apiRequest('GET', '/linkedin/publications/state');
@@ -372,12 +380,12 @@ class LinkXPCollector {
                 }
 
                 if (batch.length >= LINKXP_COLLECT.STATS_BATCH_SIZE) {
-                    await this.api.apiRequest('POST', '/linkedin/publications', batch);
+                    await this.savePublications(batch);
                     batch = [];
                 }
             }
             if (batch.length) {
-                await this.api.apiRequest('POST', '/linkedin/publications', batch);
+                await this.savePublications(batch);
             }
 
             summary.anomalies = this.logs.filter(l => l.anomalies.length).length;
@@ -536,13 +544,18 @@ class LinkXPCollector {
             const { result, entry } = response;
             const parsed = LinkXPParsers.parseInventoryPage(result.body, me);
             entry.anomalies.push(...parsed.anomalies);
+            entry.target = parsed.anomalyTarget;
             if (page === 0 && parsed.elementCount === 0) entry.anomalies.push('inventory_empty');
 
             for (const pub of parsed.publications) {
-                if (!seen.has(pub.urn)) {
-                    seen.add(pub.urn);
-                    publications.push(pub);
+                if (seen.has(pub.urn)) {
+                    // Une même activité deux fois : on garde la première, mais on le signale
+                    if (!entry.anomalies.includes('duplicate_activity')) entry.anomalies.push('duplicate_activity');
+                    entry.target = entry.target || pub.urn;
+                    continue;
                 }
+                seen.add(pub.urn);
+                publications.push(pub);
             }
 
             if (!parsed.elementCount || !parsed.paginationToken) break;
@@ -594,6 +607,32 @@ class LinkXPCollector {
         }
 
         return row;
+    }
+
+    /**
+     * POST /linkedin/publications. Les lignes refusées par l'API (data.errors) ne font pas échouer
+     * la requête : on les journalise pour qu'elles ne passent pas inaperçues.
+     */
+    async savePublications(rows) {
+        const response = await this.api.apiRequest('POST', '/linkedin/publications', rows);
+        const errors = response?.data?.errors || [];
+        const processed = response?.data?.processed_count;
+
+        if (errors.length || (typeof processed === 'number' && processed < rows.length)) {
+            // « Publication 3 invalide » : l'index renvoyé par l'API désigne la ligne du lot
+            const index = parseInt((String(errors[0] || '').match(/\d+/) || [])[0], 10);
+            this.logs.push({
+                route: 'api_publications',
+                target: rows[index]?.urn || null,
+                status: 201,
+                durationMs: 0,
+                success: false,
+                error: `${rows.length - (processed ?? rows.length)} ligne(s) refusée(s) : ${errors.slice(0, 3).join(' ; ')}`.slice(0, 255),
+                anomalies: ['api_rows_rejected'],
+                calledAt: Date.now(),
+            });
+        }
+        return response;
     }
 
     async flushLogs() {
