@@ -1,8 +1,10 @@
 {
   "manifest_version": 3,
   "name": "LinkXP - LinkedIn stats collector",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Collecte automatique des statistiques LinkedIn pour LinkXP",
+
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlavHsb72wrdCtYuOmWLqqdStCvCJ8Uz8eD3mWFjLSmqGsmxIr81OaHt26AlWX8mwWjWmTAiTroxVi9q/Ulk/+1VUWEeuK/bDmF6LClGzmMXSTWZBwwXn66M0GXZHW+O9wR1acmI6w6jqVGyIiVwMbfJwNp4mlJIc0fQ1U54sptb3JozZjWZvbPqvjT+1QOknYDALQEBgAgVATUnQGJVwG37JF1hMw0Ahy7idh5EbyR2kp+gZaNzi1CndT40vXBceDNjZ2NQm1rYCLXW1IWIxhGeuhH+CZ7klUamKLQRFFwRHaMZ5j2S4E/g0dyup8fKIuE7QixE5F96gLrDlpIXVVQIDAQAB",
 
   "permissions": [
     "storage",

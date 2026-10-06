@@ -389,9 +389,34 @@ function showNotification(message, type = 'info') {
     }, 3000);
 }
 
+// Bouton mis en évidence quand la popup est ouverte depuis l'écran de constats (ou juste après, à la main)
+const POPUP_FOCUS_TTL = 2 * 60 * 1000;
+const POPUP_FOCUS_HINTS = {
+    link: "Cliquez ici pour lier l'extension à votre compte LinkXP",
+    relink: "Extension liée à un autre compte : cliquez ici pour la délier, puis liez-la à votre compte",
+    collect: 'Cliquez ici pour importer vos publications',
+};
+
+async function applyPopupFocus() {
+    const { popupFocus } = await chrome.storage.local.get('popupFocus');
+    if (!popupFocus || Date.now() - popupFocus.at > POPUP_FOCUS_TTL) {
+        return;
+    }
+    await chrome.storage.local.remove('popupFocus');
+
+    const button = popupFocus.target === 'collect' ? getPublicationsBtn : linkAccountBtn;
+    const hint = document.createElement('p');
+    hint.className = 'focus-hint';
+    hint.textContent = '👇 ' + POPUP_FOCUS_HINTS[popupFocus.target];
+    button.parentNode.insertBefore(hint, button);
+    button.classList.add('focus-target');
+    button.scrollIntoView({ block: 'center' });
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
     await updateAuthStatus();
     setupEventListeners();
+    await applyPopupFocus();
 
     const { collectState } = await chrome.storage.local.get('collectState');
     renderCollectState(collectState);

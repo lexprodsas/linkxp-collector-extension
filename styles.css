@@ -390,3 +390,21 @@ h2 {
     background: rgba(108, 117, 125, 0.5) !important;
     color: black !important;
 }
+
+/* Bouton à utiliser, mis en évidence depuis l'écran de constats */
+.focus-hint {
+    margin: 0 0 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #0a66c2;
+}
+
+.btn.focus-target {
+    box-shadow: 0 0 0 3px rgba(10, 102, 194, 0.35);
+    animation: focus-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes focus-pulse {
+    0%, 100% { box-shadow: 0 0 0 3px rgba(10, 102, 194, 0.35); }
+    50% { box-shadow: 0 0 0 7px rgba(10, 102, 194, 0.12); }
+}

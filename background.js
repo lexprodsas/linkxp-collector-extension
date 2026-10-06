@@ -221,8 +221,25 @@ class BackgroundLinkXPAuth {
         ]);
     }
 
+    // Lié tant qu'un jeton d'accès valide peut être obtenu (rafraîchi au besoin) : un jeton d'accès expiré
+    // après 7 h ne veut pas dire que la liaison est perdue
     async isLinked() {
-        return await this.isTokenValid();
+        // Jamais liée (ou déliée) : pas de rafraîchissement à tenter, ce n'est pas une erreur
+        const tokens = await this.getStoredTokens();
+        if (!tokens.refreshToken) {
+            return false;
+        }
+        try {
+            await this.getValidAccessToken();
+            return true;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    async getDeviceId() {
+        const data = await chrome.storage.local.get(this.storageKeys.deviceId);
+        return data[this.storageKeys.deviceId] || null;
     }
 
     async syncSkills(skills) {
@@ -337,6 +354,42 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
 
         sendResponse({ success: true });
         console.log('✅ Tokens sauvegardés depuis la page web');
+        return;
+    }
+
+    // Écran de constats : version installée et liaison (le serveur vérifie que l'appareil est lié au membre connecté)
+    if (message.type === 'LINKXP_PING') {
+        (async () => {
+            const linked = await backgroundAuth.isLinked();
+            sendResponse({
+                success: true,
+                data: {
+                    version: chrome.runtime.getManifest().version,
+                    linked,
+                    deviceId: linked ? await backgroundAuth.getDeviceId() : null,
+                },
+            });
+        })();
+        return true;
+    }
+
+    // Écran de constats : ouvre la popup et y met en évidence le bouton à utiliser (link, relink ou collect)
+    if (message.type === 'LINKXP_OPEN_POPUP') {
+        (async () => {
+            const target = ['link', 'relink', 'collect'].includes(message.target) ? message.target : 'link';
+            await chrome.storage.local.set({ popupFocus: { target, at: Date.now() } });
+
+            let opened = false;
+            try {
+                // Chrome 127+ ; échoue si la fenêtre n'a pas le focus : la page affiche alors la consigne
+                await chrome.action.openPopup(sender.tab ? { windowId: sender.tab.windowId } : {});
+                opened = true;
+            } catch (error) {
+                console.warn('Ouverture de la popup impossible :', error.message);
+            }
+            sendResponse({ success: true, data: { opened } });
+        })();
+        return true;
     }
 });
 
