@@ -1,2 +1,4 @@
 /.idea/
-/linkxp-1.2.0.zip
+*.zip
+node_modules/
+.DS_Store
