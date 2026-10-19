@@ -64,6 +64,8 @@ Le champ `key` dans `manifest.json` est la **clé publique** de l'extension. Ell
 
 **Ne pas modifier ni supprimer cette clé** : l'API LinkXP utilise l'ID d'extension pour identifier les appels légitimes.
 
+Le Chrome Web Store refuse un manifest qui contient `key` : `package.ps1` la retire de la copie packagée. Une fois l'extension publiée, l'ID est celui attribué par le Web Store ; pour que l'ID local corresponde, remplacer la valeur de `key` par la clé publique affichée dans le tableau de bord développeur (Package > Afficher la clé publique).
+
 ### Constantes de collecte
 
 Les paramètres de collecte sont dans l'objet `LINKXP_COLLECT` en tête de `collector.js` :
@@ -93,15 +95,11 @@ Le détail du protocole de collecte, du parsing et de la gestion des anomalies e
 Pas de build nécessaire. Pour distribuer une nouvelle version :
 
 1. Mettre à jour `version` dans `manifest.json`
-2. Créer le zip :
-   ```bash
-   # Depuis la racine du projet
-   zip -r linkxp-X.Y.Z.zip . -x ".git/*" ".gitignore" "README.md"
-   ```
-   Ou sous PowerShell :
+2. Créer le zip (retire le champ `key` du manifest et n'inclut que les fichiers de l'extension) :
    ```powershell
-   Compress-Archive -Path .\* -DestinationPath .\linkxp-X.Y.Z.zip -Force
+   powershell -ExecutionPolicy Bypass -File .\package.ps1
    ```
+   Le zip `linkxp-X.Y.Z.zip` est créé à la racine, prêt à être envoyé sur le Chrome Web Store.
 3. Mettre à jour la version attendue côté serveur (API LinkXP) pour que le contrôle de version fonctionne
 4. Ne pas committer le zip — il est exclu par `.gitignore`
 
