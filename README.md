@@ -39,7 +39,15 @@ L'extension ne publie rien, ne modifie rien et n'interagit pas avec LinkedIn au 
 
 **`popup.js`** — Interface utilisateur. Actions : lier/délier le compte LinkXP, collecter les publications, mettre en pause / reprendre la collecte, collecter les compétences. Affiche la progression et la couverture (« statistiques détaillées pour X de vos Y posts ») en temps réel via `chrome.storage.onChanged`.
 
-## Installation en développement
+## Installation
+
+L'extension s'installe depuis le Chrome Web Store : [LinkXP — LinkedIn Stats Collector](https://chromewebstore.google.com/detail/linkxp-linkedin-stats-col/ohokllohblbpglaehhjjfncdkommmbon) (ID `ohokllohblbpglaehhjjfncdkommmbon`). Chrome la met ensuite à jour automatiquement.
+
+Une ancienne version installée à partir d'un fichier zip doit être supprimée depuis `chrome://extensions` : elle a un autre ID, que l'API LinkXP n'accepte plus pour lier un compte.
+
+## Installation en développement (contributeurs)
+
+Le mode développeur est réservé aux contributeurs.
 
 1. Cloner le dépôt :
    ```bash
@@ -64,7 +72,7 @@ Le champ `key` dans `manifest.json` est la **clé publique** de l'extension. Ell
 
 **Ne pas modifier ni supprimer cette clé** : l'API LinkXP utilise l'ID d'extension pour identifier les appels légitimes.
 
-Le Chrome Web Store refuse un manifest qui contient `key` : `package.ps1` la retire de la copie packagée. Une fois l'extension publiée, l'ID est celui attribué par le Web Store ; pour que l'ID local corresponde, remplacer la valeur de `key` par la clé publique affichée dans le tableau de bord développeur (Package > Afficher la clé publique).
+Le Chrome Web Store refuse un manifest qui contient `key` : `package.ps1` la retire de la copie packagée. L'ID de production est celui attribué par le Web Store (`ohokllohblbpglaehhjjfncdkommmbon`), le seul que l'API LinkXP accepte. Pour qu'une copie chargée en mode développeur ait le même ID, remplacer la valeur de `key` par la clé publique affichée dans le tableau de bord développeur (Package > Afficher la clé publique). C'est une clé publique : elle peut figurer dans le dépôt. La clé privée, elle, n'y a jamais sa place.
 
 ### Constantes de collecte
 
@@ -102,16 +110,17 @@ Le détail du protocole de collecte, du parsing et de la gestion des anomalies e
 
 ## Build et packaging
 
-Pas de build nécessaire. Pour distribuer une nouvelle version :
+Pas de build nécessaire. L'extension est distribuée uniquement par le Chrome Web Store. Pour publier une nouvelle version :
 
 1. Mettre à jour `version` dans `manifest.json`
-2. Créer le zip (retire le champ `key` du manifest et n'inclut que les fichiers de l'extension) :
+2. Créer le paquet (retire le champ `key` du manifest et n'inclut que les fichiers de l'extension) :
    ```powershell
    powershell -ExecutionPolicy Bypass -File .\package.ps1
    ```
-   Le zip `linkxp-X.Y.Z.zip` est créé à la racine, prêt à être envoyé sur le Chrome Web Store.
-3. Mettre à jour la version attendue côté serveur (API LinkXP) pour que le contrôle de version fonctionne
-4. Ne pas committer le zip — il est exclu par `.gitignore`
+   Le zip `linkxp-X.Y.Z.zip` est créé à la racine.
+3. L'envoyer depuis le tableau de bord développeur du Chrome Web Store (Package > Importer un nouveau package), puis soumettre la version pour examen
+4. Une fois la version publiée par le Store, mettre à jour la version attendue côté plateforme (`CHROME_EXTENSION_VERSION`) : l'écran de constats signale alors les installations restées sur une version plus ancienne. Ne pas le faire avant la publication, sinon tous les utilisateurs verraient « nouvelle version disponible » sans pouvoir l'obtenir
+5. Le zip n'est pas distribué hors du Store et ne doit pas être committé : il est exclu par `.gitignore`
 
 ## Contribuer
 
