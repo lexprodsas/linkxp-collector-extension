@@ -117,6 +117,10 @@ h2 {
 }
 
 
+.btn[hidden] {
+    display: none;
+}
+
 .btn.btn-secondary {
     background: var(--secondary);
     color: var(--text);

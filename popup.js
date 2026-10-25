@@ -1,5 +1,6 @@
 const getSkillsBtn = document.getElementById('getSkillsBtn');
 const getPublicationsBtn = document.getElementById('getPublicationsBtn');
+const toggleCollectBtn = document.getElementById('toggleCollectBtn');
 const collectStatus = document.getElementById('collectStatus');
 const linkAccountBtn = document.getElementById('linkAccountBtn');
 const authStatus = document.getElementById('authStatus');
@@ -64,6 +65,7 @@ async function linkAccount() {
 function setupEventListeners() {
     getSkillsBtn.addEventListener('click', collectSkillsOnly);
     getPublicationsBtn.addEventListener('click', collectPublications);
+    toggleCollectBtn.addEventListener('click', toggleCollection);
     linkAccountBtn.addEventListener('click', linkAccount);
 }
 
@@ -109,10 +111,60 @@ async function collectPublications() {
     }
 }
 
+// Pause ou reprise de la collecte détaillée (la file est conservée, l'inventaire n'est pas refait)
+async function toggleCollection() {
+    const action = toggleCollectBtn.dataset.action;
+    try {
+        toggleCollectBtn.disabled = true;
+        await sendMessageToBackground(action === 'pause' ? 'pauseCollection' : 'resumeCollection');
+    } catch (error) {
+        showNotification('Erreur: ' + error.message, 'error');
+    } finally {
+        toggleCollectBtn.disabled = false;
+    }
+}
+
+function renderToggleButton(action) {
+    toggleCollectBtn.hidden = !action;
+    toggleCollectBtn.dataset.action = action || '';
+    toggleCollectBtn.textContent = action === 'pause' ? 'Mettre en pause' : 'Reprendre la collecte';
+}
+
+function coverageLine(state) {
+    const coverage = state.coverage;
+    if (!coverage?.total) return null;
+    const suffix = state.status === 'paused' ? ', collecte en pause'
+        : (state.running || state.status === 'daily_cap') && coverage.detailed < coverage.total ? ', collecte en cours' : '';
+    return `<p>Statistiques détaillées pour ${coverage.detailed} de vos ${coverage.total} posts${suffix}</p>`;
+}
+
+// « environ 25 min », « environ 1 h 30 » (arrondi à 5 min au-delà d'une heure)
+function formatDuration(ms) {
+    const minutes = Math.round(ms / 60000);
+    if (minutes < 1) return "moins d'une minute";
+    if (minutes < 60) return `environ ${minutes} min`;
+    const rounded = Math.round(minutes / 5) * 5;
+    const hours = Math.floor(rounded / 60);
+    const rest = rounded % 60;
+    return `environ ${hours} h${rest ? ' ' + String(rest).padStart(2, '0') : ''}`;
+}
+
+function estimateLine(state) {
+    const estimate = state.estimate;
+    if (!state.running || !estimate) return null;
+    if (estimate.extraDays === 1) return '<p>Fin estimée : demain (limite de requêtes par jour)</p>';
+    if (estimate.extraDays > 1) return `<p>Fin estimée : dans ${estimate.extraDays} jours (limite de requêtes par jour)</p>`;
+    return `<p>Temps restant estimé : ${formatDuration(estimate.remainingMs)}</p>`;
+}
+
 function renderCollectState(state) {
     const running = !!state?.running;
-    getPublicationsBtn.disabled = running;
+    const status = state?.status || null;
+    getPublicationsBtn.disabled = running || status === 'daily_cap';
     getPublicationsBtn.textContent = running ? 'Collecte en cours…' : BUTTON_LABELS.getPublicationsBtn;
+
+    renderToggleButton(running || status === 'daily_cap' ? 'pause'
+        : ['paused', 'error'].includes(status) ? 'resume' : null);
 
     if (!state) {
         collectStatus.innerHTML = '<div class="empty-state">Aucune collecte pour le moment</div>';
@@ -120,16 +172,23 @@ function renderCollectState(state) {
     }
 
     const lines = [];
+    const coverage = coverageLine(state);
     if (running) {
         lines.push(`<p>${escapeHtml(state.message || 'Collecte en cours…')}</p>`);
-        lines.push('<p style="font-size:12px; color:#666;">Vous pouvez fermer cette fenêtre, la collecte continue.</p>');
+        if (coverage) lines.push(coverage);
+        const estimate = estimateLine(state);
+        if (estimate) lines.push(estimate);
+        lines.push('<p style="font-size:12px; color:#666;">La collecte avance lentement pour rester discrète. Vous pouvez fermer cette fenêtre et continuer à travailler : laissez Chrome ouvert.</p>');
     } else {
         const date = state.finishedAt ? new Date(state.finishedAt).toLocaleString('fr-FR') : '';
-        lines.push(`<p><strong>${state.ok ? '✅' : '⚠️'} ${escapeHtml(state.message || '')}</strong></p>`);
+        const icon = state.ok ? '✅' : ['paused', 'daily_cap'].includes(status) ? '⏸️' : '⚠️';
+        lines.push(`<p><strong>${icon} ${escapeHtml(state.message || '')}</strong></p>`);
+        if (coverage) lines.push(coverage);
         if (state.summary) {
             const s = state.summary;
             if (s.inventory) lines.push(`<p>${s.inventory} publications, dont ${s.originals} originales</p>`);
             if (s.detailed) lines.push(`<p>${s.detailed} posts mis à jour en détail</p>`);
+            if (s.unavailable) lines.push(`<p>${s.unavailable} posts indisponibles</p>`);
             if (s.followers !== null && s.followers !== undefined) lines.push(`<p>${s.followers} abonnés</p>`);
         }
         if (date) lines.push(`<p style="font-size:12px; color:#666;">${date}</p>`);
@@ -395,6 +454,7 @@ const POPUP_FOCUS_HINTS = {
     link: "Cliquez ici pour lier l'extension à votre compte LinkXP",
     relink: "Extension liée à un autre compte : cliquez ici pour la délier, puis liez-la à votre compte",
     collect: 'Cliquez ici pour importer vos publications',
+    resume: 'Cliquez ici pour reprendre la collecte',
 };
 
 async function applyPopupFocus() {
@@ -404,7 +464,7 @@ async function applyPopupFocus() {
     }
     await chrome.storage.local.remove('popupFocus');
 
-    const button = popupFocus.target === 'collect' ? getPublicationsBtn : linkAccountBtn;
+    const button = { collect: getPublicationsBtn, resume: toggleCollectBtn }[popupFocus.target] || linkAccountBtn;
     const hint = document.createElement('p');
     hint.className = 'focus-hint';
     hint.textContent = '👇 ' + POPUP_FOCUS_HINTS[popupFocus.target];
@@ -416,10 +476,11 @@ async function applyPopupFocus() {
 document.addEventListener('DOMContentLoaded', async () => {
     await updateAuthStatus();
     setupEventListeners();
-    await applyPopupFocus();
 
+    // État rendu avant la mise en évidence : le bouton « Reprendre » n'apparaît qu'une fois l'état connu
     const { collectState } = await chrome.storage.local.get('collectState');
     renderCollectState(collectState);
+    await applyPopupFocus();
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {

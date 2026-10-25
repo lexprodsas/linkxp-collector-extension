@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
   "name": "LinkXP - LinkedIn stats collector",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Collecte automatique des statistiques LinkedIn pour LinkXP",
 
-  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlavHsb72wrdCtYuOmWLqqdStCvCJ8Uz8eD3mWFjLSmqGsmxIr81OaHt26AlWX8mwWjWmTAiTroxVi9q/Ulk/+1VUWEeuK/bDmF6LClGzmMXSTWZBwwXn66M0GXZHW+O9wR1acmI6w6jqVGyIiVwMbfJwNp4mlJIc0fQ1U54sptb3JozZjWZvbPqvjT+1QOknYDALQEBgAgVATUnQGJVwG37JF1hMw0Ahy7idh5EbyR2kp+gZaNzi1CndT40vXBceDNjZ2NQm1rYCLXW1IWIxhGeuhH+CZ7klUamKLQRFFwRHaMZ5j2S4E/g0dyup8fKIuE7QixE5F96gLrDlpIXVVQIDAQAB",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArrl5jmLoBmLI/uD5BfxnT7+uzBpzdU4NPVrvWI62/Q6ahoMeQj+8Al/0pf+FBhGthM8RlkElCZJcl5We+F+lwqi7s6fUN/AOGcrFEMw3OsJhbXCPygAFKTHWhpjKapX/vJNXYawMiz/wix3DOPMiH6QGH13K+76Wd6Z1D8+xksyIFsMViMt50JkSExg9RwJ/3InvjVkNm/PMsnjwKc/tOJKIzeZAFKEtnmRPy5Z9Ua/CzXBBWXCgJC8vErNhY3O4LXM+yVEMJEPpBEVW8cHQ39X6Nh+wNn5BpQ4QH15HD3xJB/B1LGwIUxGTtLxs8Iz9eGDDm1WMhGbclnhe5gJcHQIDAQAB",
 
   "permissions": [
     "storage",
+    "alarms",
     "activeTab",
     "scripting",
     "tabs"

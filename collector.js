@@ -1,10 +1,18 @@
 /**
- * Collecte LinkedIn V1 (lot 1) : inventaire voyager, page de statistiques par post, commentaires.
+ * Collecte LinkedIn V1 : inventaire voyager, puis collecte détaillée progressive (page de statistiques
+ * par post, commentaires) traitée lentement en arrière-plan.
  *
  * Toutes les requêtes LinkedIn sont exécutées DANS un onglet linkedin.com (chrome.scripting),
  * avec la session de l'utilisateur : même origine, cookies et jeton CSRF disponibles.
- * Garde-fous : déclenchée par l'utilisateur, une requête à la fois, 3 à 5 s entre deux requêtes,
- * 100 posts au plus en collecte détaillée par passage, arrêt immédiat sur un signal de blocage.
+ *
+ * Priorité à la discrétion vis-à-vis de LinkedIn, quitte à une collecte longue :
+ * - seuls les posts qui en ont besoin sont détaillés (originaux de J+7 à 12 mois au détail incomplet,
+ *   demandes d'actualisation, posts complets dont les interactions ont nettement bougé) ;
+ * - une requête à la fois, 8 à 15 s entre deux requêtes de détail, une pause longue toutes les 25 pages ;
+ * - plafond de requêtes LinkedIn par jour ; arrêt immédiat sur un signal de blocage, sans nouvel essai.
+ *
+ * Le passage est persisté (chrome.storage.local.collectJob) : file, avancement, lignes et journal pas
+ * encore envoyés. Une collecte interrompue (service worker arrêté, Chrome fermé) reprend où elle en était.
  *
  * Chargé par background.js via importScripts().
  */
@@ -12,15 +20,23 @@
 const LINKXP_COLLECT = {
     INVENTORY_PAGE_SIZE: 50,
     INVENTORY_MAX_PAGES: 10,          // 500 activités au plus
-    MAX_DETAILED_POSTS: 100,          // posts passés en collecte détaillée par passage
-    DELAY_MIN_MS: 3000,
-    DELAY_MAX_MS: 5000,
+    INVENTORY_DELAY_MS: [3000, 5000], // entre deux requêtes de l'inventaire (quelques requêtes par passage)
+    DETAIL_DELAY_MS: [8000, 15000],   // entre deux requêtes de la collecte détaillée
+    LONG_PAUSE_EVERY: 25,             // pages de statistiques entre deux pauses longues
+    LONG_PAUSE_MS: [3 * 60 * 1000, 6 * 60 * 1000],
+    DAILY_REQUEST_CAP: 300,           // requêtes LinkedIn par jour, tous passages confondus
     API_BATCH_SIZE: 50,               // publications par POST d'inventaire
-    STATS_BATCH_SIZE: 10,             // publications par POST de collecte détaillée
     LOG_BATCH_SIZE: 200,
-    MATURITY_DAYS: 7,                 // un post n'est comparable qu'à partir de J+7
-    REFRESH_WINDOW_DAYS: 90,          // posts récents dont on rafraîchit le détail
-    REFRESH_AFTER_DAYS: 7,
+    LOG_FLUSH_SIZE: 20,               // le journal part pendant la collecte, pas seulement à la fin
+    MATURITY_DAYS: 7,                 // un post n'est détaillé qu'à partir de J+7
+    DETAIL_WINDOW_DAYS: 365,          // posts détaillés : publiés dans les 12 derniers mois
+    REFRESH_WINDOW_DAYS: 90,          // un post complet n'est plus actualisé au-delà
+    REFRESH_MIN_GROWTH: 0.15,         // actualisation : interactions en hausse d'au moins 15 %…
+    REFRESH_MIN_INTERACTIONS: 5,      // … et d'au moins 5
+    MAX_AUTO_REFRESHES: 2,
+    MAX_DETAIL_FAILURES: 3,           // échecs consécutifs avant de marquer un post indisponible
+    KEEPALIVE_MS: 20000,              // attente découpée : le service worker n'est pas arrêté pendant une pause
+    RESUME_DELAY_MS: [60 * 1000, 2 * 60 * 1000], // avant la première requête d'une reprise
     FIRST_COMMENT_LINK_WINDOW_MS: 30 * 60 * 1000,
 };
 
@@ -31,6 +47,49 @@ class LinkedInBlockedError extends Error {
         super(message);
         this.name = 'LinkedInBlockedError';
     }
+}
+
+// Plafond de requêtes du jour atteint : reprise le lendemain
+class DailyCapError extends Error {
+    constructor() {
+        super('Plafond de requêtes du jour atteint');
+        this.name = 'DailyCapError';
+    }
+}
+
+// Pause demandée par l'utilisateur
+class CollectStoppedError extends Error {
+    constructor() {
+        super('Collecte mise en pause');
+        this.name = 'CollectStoppedError';
+    }
+}
+
+function linkxpRandomBetween([min, max]) {
+    return min + Math.random() * (max - min);
+}
+
+/**
+ * Attente découpée en tranches de 20 s, chacune suivie d'un appel d'extension léger : Chrome arrête un
+ * service worker inactif au bout de 30 s, sans erreur visible. Une tranche anormalement longue signale une
+ * sortie de veille : on attend alors un délai de reprise avant de rendre la main à la collecte.
+ */
+async function linkxpSleep(ms, shouldStop = () => false) {
+    let deadline = Date.now() + ms;
+    let last = Date.now();
+
+    while (Date.now() < deadline) {
+        if (shouldStop()) throw new CollectStoppedError();
+        await new Promise(resolve => setTimeout(resolve, Math.min(LINKXP_COLLECT.KEEPALIVE_MS, deadline - Date.now())));
+        await chrome.runtime.getPlatformInfo();
+
+        const now = Date.now();
+        if (now - last > LINKXP_COLLECT.KEEPALIVE_MS + 60 * 1000) {
+            deadline = Math.max(deadline, now + linkxpRandomBetween(LINKXP_COLLECT.RESUME_DELAY_MS));
+        }
+        last = now;
+    }
+    if (shouldStop()) throw new CollectStoppedError();
 }
 
 // ========================================
@@ -242,36 +301,103 @@ const LinkXPParsers = {
         return { fetched: comments.length, authorComments, hasLinkFirstComment };
     },
 
+    interactions(pub) {
+        if (pub.reactions === null && pub.comments === null && pub.reposts === null) return null;
+        return (pub.reactions || 0) + (pub.comments || 0) + (pub.reposts || 0);
+    },
+
+    // Détail complet : la page de statistiques a donné visites de profil et abonnés gagnés
+    isDetailComplete(stateRow) {
+        return !!stateRow?.stats_collected_at && stateRow.profile_views !== null && stateRow.followers_gained !== null;
+    },
+
     /**
-     * Posts originaux à passer en collecte détaillée, par priorité :
-     * 1. jamais collectés en détail (les plus récents d'abord) ;
-     * 2. collectés avant J+7 et désormais matures ;
-     * 3. publiés depuis moins de 90 jours et collectés il y a plus de 7 jours.
+     * Posts complets détaillés avant le suivi des compteurs : l'inventaire courant devient la référence
+     * pour l'actualisation sur signal. Renvoie les champs à ajouter à leur ligne d'inventaire.
      */
-    selectPostsForDetail(publications, stateRows, nowMs) {
+    missingDetailBaselines(publications, stateRows) {
         const state = new Map((stateRows || []).map(row => [row.urn, row]));
-        const buckets = [[], [], []];
+        const baselines = new Map();
+
+        for (const pub of publications) {
+            const row = state.get(pub.urn);
+            if (pub.type !== 'original' || !LinkXPParsers.isDetailComplete(row) || row.detail_interactions !== null) continue;
+            const interactions = LinkXPParsers.interactions(pub);
+            if (interactions === null) continue;
+            baselines.set(pub.urn, { detailInteractions: interactions });
+        }
+        return baselines;
+    },
+
+    /**
+     * File de collecte détaillée, dans l'ordre de traitement :
+     * 1. demandes d'actualisation faites depuis l'app ;
+     * 2. posts jamais détaillés ou incomplets (visites de profil ou abonnés gagnés vides) ;
+     * 3. posts complets de moins de 90 jours dont les interactions ont augmenté d'au moins 15 % et de 5,
+     *    deux actualisations automatiques au plus.
+     * Les plus récents d'abord dans chaque groupe. Seuls les originaux publiés de J+7 à 12 mois y entrent,
+     * jamais un post marqué indisponible (sauf demande d'actualisation).
+     * Renvoie aussi la couverture : posts au détail complet parmi les originaux de J+7 à 12 mois.
+     */
+    buildDetailQueue(publications, stateRows, nowMs) {
+        const state = new Map((stateRows || []).map(row => [row.urn, row]));
+        const buckets = { manual: [], missing: [], refresh: [] };
+        const coverage = { detailed: 0, total: 0 };
 
         for (const pub of publications) {
             if (pub.type !== 'original') continue;
 
             const publishedMs = LinkXPParsers.publishedMsFromActivityUrn(pub.urn);
-            const collectedSec = state.get(pub.urn)?.stats_collected_at;
-            const collectedMs = collectedSec ? collectedSec * 1000 : null;
-            const maturityMs = publishedMs + LINKXP_COLLECT.MATURITY_DAYS * DAY_MS;
+            const ageMs = nowMs - publishedMs;
+            if (!publishedMs || ageMs < LINKXP_COLLECT.MATURITY_DAYS * DAY_MS) continue;
 
-            if (!collectedMs) {
-                buckets[0].push(pub);
-            } else if (collectedMs < maturityMs && nowMs >= maturityMs) {
-                buckets[1].push(pub);
-            } else if (nowMs - publishedMs < LINKXP_COLLECT.REFRESH_WINDOW_DAYS * DAY_MS
-                && nowMs - collectedMs > LINKXP_COLLECT.REFRESH_AFTER_DAYS * DAY_MS) {
-                buckets[2].push(pub);
+            const row = state.get(pub.urn) || null;
+            const complete = LinkXPParsers.isDetailComplete(row);
+            const inWindow = ageMs <= LINKXP_COLLECT.DETAIL_WINDOW_DAYS * DAY_MS;
+            if (inWindow) {
+                coverage.total++;
+                if (complete) coverage.detailed++;
             }
+
+            const interactions = LinkXPParsers.interactions(pub);
+            let reason = null;
+            if (row?.refresh_requested_at) {
+                reason = 'manual';
+            } else if (!inWindow || row?.detail_unavailable) {
+                continue;
+            } else if (!complete) {
+                reason = 'missing';
+            } else if (ageMs <= LINKXP_COLLECT.REFRESH_WINDOW_DAYS * DAY_MS
+                && (row.detail_refresh_count || 0) < LINKXP_COLLECT.MAX_AUTO_REFRESHES
+                && row.detail_interactions !== null && interactions !== null) {
+                const growth = interactions - row.detail_interactions;
+                if (growth >= LINKXP_COLLECT.REFRESH_MIN_INTERACTIONS
+                    && growth >= row.detail_interactions * LINKXP_COLLECT.REFRESH_MIN_GROWTH) {
+                    reason = 'refresh';
+                }
+            }
+            if (!reason) continue;
+
+            buckets[reason].push({
+                urn: pub.urn,
+                publishedMs,
+                reason,
+                complete,
+                interactions,
+                inventoryComments: pub.comments,
+                // Commentaires lus une seule fois, puis relus seulement si leur total a changé depuis le dernier détail
+                readComments: !row || row.comments_author === null || row.detail_comments === null
+                    || (pub.comments !== null && pub.comments !== row.detail_comments),
+                inWindow,
+                inventoryImpressions: pub.impressions,
+                failures: row?.detail_failures || 0,
+                refreshCount: row?.detail_refresh_count || 0,
+            });
         }
 
-        const newestFirst = (a, b) => LinkXPParsers.publishedMsFromActivityUrn(b.urn) - LinkXPParsers.publishedMsFromActivityUrn(a.urn);
-        return buckets.flatMap(bucket => bucket.sort(newestFirst)).slice(0, LINKXP_COLLECT.MAX_DETAILED_POSTS);
+        const newestFirst = (a, b) => b.publishedMs - a.publishedMs;
+        const queue = [buckets.manual, buckets.missing, buckets.refresh].flatMap(bucket => bucket.sort(newestFirst));
+        return { queue, coverage };
     },
 };
 
@@ -324,89 +450,224 @@ async function linkxpLinkedInRequest(path, kind) {
 }
 
 // ========================================
-// Orchestration d'un passage de collecte
+// Orchestration de la collecte (passage persisté, repris après interruption)
 // ========================================
+
+const LINKXP_JOB_KEY = 'collectJob';
+const LINKXP_DAILY_KEY = 'collectDaily';
+
+// Jour local (AAAA-MM-JJ) du plafond de requêtes
+function linkxpToday() {
+    return new Date().toLocaleDateString('sv-SE');
+}
 
 class LinkXPCollector {
     /**
-     * @param api       instance de BackgroundLinkXPAuth (appels à l'API LinkXP)
+     * @param api        instance de BackgroundLinkXPAuth (appels à l'API LinkXP)
      * @param onProgress callback(state) pour la popup
+     * @param job        passage persisté à reprendre ; absent : nouveau passage, inventaire compris
      */
-    constructor(api, onProgress) {
+    constructor(api, onProgress, job = null) {
         this.api = api;
         this.onProgress = onProgress || (() => {});
-        this.runId = crypto.randomUUID();
-        this.logs = [];
+        this.job = job || {
+            runId: crypto.randomUUID(),
+            status: 'running',
+            phase: 'inventory',           // inventory, puis details une fois la file construite
+            startedAt: Date.now(),
+            me: null,
+            queue: [],
+            queueTotal: 0,
+            coverage: null,               // { detailed, total } : originaux de J+7 à 12 mois au détail complet
+            pendingRows: [],              // lignes collectées pas encore acceptées par l'API
+            logs: [],                     // journal pas encore envoyé
+            statsSinceLongPause: 0,
+            lastLinkedInCall: 0,
+            error: null,
+            summary: { inventory: 0, originals: 0, detailed: 0, unavailable: 0, followers: null, anomalies: 0 },
+        };
         this.tabId = null;
-        this.lastLinkedInCall = 0;
+        this.delay = LINKXP_COLLECT.INVENTORY_DELAY_MS;
+        this.stopRequested = false;
     }
 
-    async run() {
-        const summary = { inventory: 0, originals: 0, detailed: 0, followers: null, anomalies: 0 };
+    static async loadJob() {
+        const { [LINKXP_JOB_KEY]: job } = await chrome.storage.local.get(LINKXP_JOB_KEY);
+        return job || null;
+    }
 
+    get logs() {
+        return this.job.logs;
+    }
+
+    // Pause demandée : prise en compte entre deux posts ou pendant une pause longue
+    requestStop() {
+        this.stopRequested = true;
+    }
+
+    async saveJob(status = null) {
+        if (status) this.job.status = status;
+        await chrome.storage.local.set({ [LINKXP_JOB_KEY]: this.job });
+    }
+
+    /**
+     * Déroule le passage jusqu'au bout de la file, ou jusqu'à un arrêt.
+     * Issue (status) : done, blocked (signal LinkedIn), daily_cap, paused (utilisateur) ou error.
+     */
+    async run() {
+        let status = 'done';
         try {
+            await this.saveJob('running');
             this.tabId = await this.findLinkedInTab();
 
-            this.progress('profile', 'Lecture du compte LinkedIn…');
-            const me = await this.fetchMe();
-
-            const followers = await this.fetchFollowers(me);
-            if (followers !== null) {
-                summary.followers = followers;
-                await this.api.apiRequest('POST', '/linkedin/profile', { followers });
+            await this.flushPendingRows();
+            if (this.job.phase === 'inventory') {
+                await this.runInventory();
             }
-
-            const publications = await this.fetchInventory(me);
-            summary.inventory = publications.length;
-            summary.originals = publications.filter(p => p.type === 'original').length;
-
-            this.progress('inventory_sync', `Envoi de ${publications.length} publications…`);
-            for (let i = 0; i < publications.length; i += LINKXP_COLLECT.API_BATCH_SIZE) {
-                await this.savePublications(publications.slice(i, i + LINKXP_COLLECT.API_BATCH_SIZE));
-            }
-
-            const state = await this.api.apiRequest('GET', '/linkedin/publications/state');
-            const selected = LinkXPParsers.selectPostsForDetail(publications, state?.data || [], Date.now());
-
-            let batch = [];
-            for (const [index, pub] of selected.entries()) {
-                this.progress('details', `Statistiques détaillées ${index + 1}/${selected.length}…`, index, selected.length);
-                try {
-                    batch.push(await this.fetchPostDetails(pub, me));
-                    summary.detailed++;
-                } catch (error) {
-                    // Échec isolé (déjà journalisé) : on passe au post suivant, sauf blocage
-                    if (error instanceof LinkedInBlockedError) throw error;
-                }
-
-                if (batch.length >= LINKXP_COLLECT.STATS_BATCH_SIZE) {
-                    await this.savePublications(batch);
-                    batch = [];
-                }
-            }
-            if (batch.length) {
-                await this.savePublications(batch);
-            }
-
-            summary.anomalies = this.logs.filter(l => l.anomalies.length).length;
-            return { ok: true, summary };
+            await this.runDetails();
+            this.job.error = null;
 
         } catch (error) {
-            const blocked = error instanceof LinkedInBlockedError;
-            return {
-                ok: false,
-                blocked,
-                // Côté utilisateur : un message neutre plutôt que des chiffres faux
-                error: blocked ? 'Collecte momentanément indisponible. Réessayez plus tard.' : error.message,
-                summary,
-            };
-        } finally {
-            await this.flushLogs();
+            if (error instanceof LinkedInBlockedError) status = 'blocked';
+            else if (error instanceof DailyCapError) status = 'daily_cap';
+            else if (error instanceof CollectStoppedError) status = 'paused';
+            else status = 'error';
+            // Côté utilisateur : un message neutre plutôt que des chiffres faux
+            this.job.error = status === 'blocked' ? 'Collecte momentanément indisponible. Réessayez plus tard.'
+                : status === 'error' ? error.message : null;
         }
+
+        await this.flushLogs();
+        await this.saveJob(status);
+        return { status, error: this.job.error, summary: this.job.summary, coverage: this.job.coverage };
     }
 
-    progress(phase, message, done = null, total = null) {
-        this.onProgress({ phase, message, done, total, runId: this.runId });
+    progress(phase, message, done = null, total = null, estimate = null) {
+        this.onProgress({ phase, message, done, total, estimate, runId: this.job.runId, coverage: this.job.coverage });
+    }
+
+    /**
+     * Temps restant estimé pour la file : requêtes à faire (commentaires seulement si le post en a),
+     * délai moyen entre deux requêtes, pauses longues à venir, et jours de plus si le plafond du jour ne suffit pas.
+     */
+    async estimate(extraMs = 0) {
+        const queue = this.job.queue;
+        const requests = queue.reduce((n, item) => n + (item.readComments && item.inventoryComments !== 0 ? 2 : 1), 0);
+        const average = ([min, max]) => (min + max) / 2;
+        const longPauses = queue.length ? Math.floor((this.job.statsSinceLongPause + queue.length - 1) / LINKXP_COLLECT.LONG_PAUSE_EVERY) : 0;
+        const budget = Math.max(0, LINKXP_COLLECT.DAILY_REQUEST_CAP - await this.dailyCount());
+
+        return {
+            remainingMs: Math.round(extraMs + requests * (average(LINKXP_COLLECT.DETAIL_DELAY_MS) + 1000)
+                + longPauses * average(LINKXP_COLLECT.LONG_PAUSE_MS)),
+            // 0 : fin aujourd'hui ; sinon nombre de jours de plus, le plafond étant remis à zéro chaque jour
+            extraDays: requests > budget ? Math.ceil((requests - budget) / LINKXP_COLLECT.DAILY_REQUEST_CAP) : 0,
+        };
+    }
+
+    /**
+     * Profil, abonnés et inventaire complet, puis construction de la file de collecte détaillée.
+     * Rejoué en entier si le passage est interrompu avant la fin.
+     */
+    async runInventory() {
+        this.delay = LINKXP_COLLECT.INVENTORY_DELAY_MS;
+        const summary = this.job.summary;
+
+        this.progress('profile', 'Lecture du compte LinkedIn…');
+        const me = await this.fetchMe();
+        this.job.me = me;
+
+        const followers = await this.fetchFollowers(me);
+        if (followers !== null) {
+            summary.followers = followers;
+            await this.api.apiRequest('POST', '/linkedin/profile', { followers });
+        }
+
+        const publications = await this.fetchInventory(me);
+        summary.inventory = publications.length;
+        summary.originals = publications.filter(p => p.type === 'original').length;
+
+        // État lu avant l'envoi de l'inventaire : la file compare les compteurs actuels à ceux du dernier détail
+        const state = (await this.api.apiRequest('GET', '/linkedin/publications/state'))?.data || [];
+        const baselines = LinkXPParsers.missingDetailBaselines(publications, state);
+        const rows = publications.map(pub => ({ ...pub, ...baselines.get(pub.urn) }));
+
+        this.progress('inventory_sync', `Envoi de ${rows.length} publications…`);
+        for (let i = 0; i < rows.length; i += LINKXP_COLLECT.API_BATCH_SIZE) {
+            await this.savePublications(rows.slice(i, i + LINKXP_COLLECT.API_BATCH_SIZE));
+        }
+
+        const { queue, coverage } = LinkXPParsers.buildDetailQueue(publications, state, Date.now());
+        Object.assign(this.job, { phase: 'details', queue, queueTotal: queue.length, coverage });
+        await this.saveJob();
+    }
+
+    /**
+     * Collecte détaillée, un post à la fois. Chaque ligne est persistée puis envoyée dès que le post est
+     * collecté : une interruption ne perd au plus que la requête en cours, et le post reste en tête de file.
+     */
+    async runDetails() {
+        this.delay = LINKXP_COLLECT.DETAIL_DELAY_MS;
+        const job = this.job;
+
+        while (job.queue.length) {
+            if (this.stopRequested) throw new CollectStoppedError();
+
+            const item = job.queue[0];
+            await this.checkDailyBudget(item.readComments ? 2 : 1);
+
+            const position = job.queueTotal - job.queue.length + 1;
+            this.progress('details', `Statistiques détaillées ${position}/${job.queueTotal}…`, position - 1, job.queueTotal, await this.estimate());
+
+            let row = null;
+            try {
+                row = await this.fetchPostDetails(item, job.me);
+            } catch (error) {
+                // Échec isolé (déjà journalisé) : compté comme un échec du post, sauf blocage ou plafond
+                if (error instanceof LinkedInBlockedError || error instanceof DailyCapError) throw error;
+            }
+
+            const complete = !!row && row.profileViews !== undefined && row.followersGained !== undefined;
+            if (complete) {
+                Object.assign(row, { statsCollected: true, detailFailures: 0 });
+                if (item.interactions !== null) row.detailInteractions = item.interactions;
+                if (item.reason === 'refresh') row.detailRefreshCount = item.refreshCount + 1;
+                job.summary.detailed++;
+                if (!item.complete && item.inWindow && job.coverage) job.coverage.detailed++;
+            } else {
+                row = { ...(row || {}), urn: item.urn, detailFailures: item.failures + 1 };
+                if (row.detailFailures >= LINKXP_COLLECT.MAX_DETAIL_FAILURES) {
+                    row.detailUnavailable = true;
+                    job.summary.unavailable++;
+                    this.logs.push({
+                        route: 'post_detail',
+                        target: item.urn,
+                        status: 0,
+                        durationMs: 0,
+                        success: false,
+                        error: `${row.detailFailures} échecs consécutifs : post indisponible`,
+                        anomalies: ['post_unavailable'],
+                        calledAt: Date.now(),
+                    });
+                }
+            }
+
+            job.pendingRows.push(row);
+            job.queue.shift();
+            await this.saveJob();
+            await this.flushPendingRows();
+            if (this.logs.length >= LINKXP_COLLECT.LOG_FLUSH_SIZE) {
+                await this.flushLogs();
+            }
+
+            if (++job.statsSinceLongPause >= LINKXP_COLLECT.LONG_PAUSE_EVERY && job.queue.length) {
+                job.statsSinceLongPause = 0;
+                await this.saveJob();
+                const pauseMs = linkxpRandomBetween(LINKXP_COLLECT.LONG_PAUSE_MS);
+                this.progress('details', `Pause de quelques minutes (${position}/${job.queueTotal})…`, position, job.queueTotal, await this.estimate(pauseMs));
+                await linkxpSleep(pauseMs, () => this.stopRequested);
+            }
+        }
     }
 
     async findLinkedInTab() {
@@ -414,6 +675,7 @@ class LinkXPCollector {
         const tab = tabs.find(t => t.active) || tabs[0];
         if (tab) return tab.id;
 
+        // Aucun onglet LinkedIn : la route actuelle en exige un (même origine), ouvert sans prendre le focus
         const created = await chrome.tabs.create({ url: 'https://www.linkedin.com/feed/', active: false });
         await new Promise(resolve => {
             const listener = (tabId, info) => {
@@ -428,18 +690,39 @@ class LinkXPCollector {
     }
 
     async pause() {
-        const wait = LINKXP_COLLECT.DELAY_MIN_MS + Math.random() * (LINKXP_COLLECT.DELAY_MAX_MS - LINKXP_COLLECT.DELAY_MIN_MS);
-        const elapsed = Date.now() - this.lastLinkedInCall;
-        if (this.lastLinkedInCall && elapsed < wait) {
-            await new Promise(resolve => setTimeout(resolve, wait - elapsed));
+        const wait = linkxpRandomBetween(this.delay);
+        const elapsed = Date.now() - this.job.lastLinkedInCall;
+        if (this.job.lastLinkedInCall && elapsed < wait) {
+            await linkxpSleep(wait - elapsed);
         }
     }
 
+    async dailyCount() {
+        const { [LINKXP_DAILY_KEY]: daily } = await chrome.storage.local.get(LINKXP_DAILY_KEY);
+        return daily?.day === linkxpToday() ? daily.count : 0;
+    }
+
+    // Un post n'est pas commencé s'il ne peut pas être fini dans le plafond du jour
+    async checkDailyBudget(needed) {
+        if (await this.dailyCount() + needed > LINKXP_COLLECT.DAILY_REQUEST_CAP) {
+            throw new DailyCapError();
+        }
+    }
+
+    async countRequest() {
+        const count = await this.dailyCount();
+        if (count >= LINKXP_COLLECT.DAILY_REQUEST_CAP) {
+            throw new DailyCapError();
+        }
+        await chrome.storage.local.set({ [LINKXP_DAILY_KEY]: { day: linkxpToday(), count: count + 1 } });
+    }
+
     /**
-     * Une requête LinkedIn, journalisée. Lève LinkedInBlockedError sur 429, 999,
-     * ou redirection vers une page de connexion ou de vérification.
+     * Une requête LinkedIn, journalisée et comptée dans le plafond du jour. Lève LinkedInBlockedError
+     * sur 429, 999, ou redirection vers une page de connexion ou de vérification.
      */
     async linkedInRequest(route, path, kind, target = null) {
+        await this.countRequest();
         await this.pause();
         const calledAt = Date.now();
 
@@ -461,7 +744,7 @@ class LinkXPCollector {
             });
             result = injection?.result || { status: 0, error: String(error.message || error) };
         }
-        this.lastLinkedInCall = Date.now();
+        this.job.lastLinkedInCall = Date.now();
 
         const entry = {
             route,
@@ -507,7 +790,7 @@ class LinkXPCollector {
             if (followers === null) entry.anomalies.push('followers_missing');
             return followers;
         } catch (error) {
-            if (error instanceof LinkedInBlockedError) throw error;
+            if (error instanceof LinkedInBlockedError || error instanceof DailyCapError) throw error;
             return null; // non bloquant pour la collecte des publications
         }
     }
@@ -538,7 +821,7 @@ class LinkXPCollector {
                 response = await this.linkedInRequest('profile_updates', `/voyager/api/identity/profileUpdatesV2?${params}`, 'json');
             } catch (error) {
                 // Une page suivante en échec : on garde l'inventaire déjà lu
-                if (page === 0 || error instanceof LinkedInBlockedError) throw error;
+                if (page === 0 || error instanceof LinkedInBlockedError || error instanceof DailyCapError) throw error;
                 break;
             }
             const { result, entry } = response;
@@ -567,46 +850,60 @@ class LinkXPCollector {
     }
 
     /**
-     * Page de statistiques du post, puis commentaires si le post en a.
-     * Renvoie une ligne partielle pour l'API (statsCollected = true).
+     * Page de statistiques du post, puis commentaires s'il en a et qu'ils doivent être (re)lus.
+     * Renvoie une ligne partielle pour l'API ; le détail est complet si visites de profil et abonnés gagnés y sont.
      */
-    async fetchPostDetails(pub, me) {
-        const activityId = LinkXPParsers.activityId(pub.urn);
-        const publishedMs = LinkXPParsers.publishedMsFromActivityUrn(pub.urn);
-        const row = { urn: pub.urn, statsCollected: true };
+    async fetchPostDetails(item, me) {
+        const activityId = LinkXPParsers.activityId(item.urn);
+        const row = { urn: item.urn };
 
-        const { result, entry } = await this.linkedInRequest('post_stats', `/analytics/post-summary/urn:li:activity:${activityId}/`, 'stats', pub.urn);
+        const { result, entry } = await this.linkedInRequest('post_stats', `/analytics/post-summary/urn:li:activity:${activityId}/`, 'stats', item.urn);
         const stats = LinkXPParsers.parseStatsText(result.text);
         entry.anomalies.push(...stats.anomalies);
 
-        if (stats.values.impressions !== null && pub.impressions && stats.values.impressions < pub.impressions * 0.9) {
+        if (stats.values.impressions !== null && item.inventoryImpressions && stats.values.impressions < item.inventoryImpressions * 0.9) {
             entry.anomalies.push('stats_impressions_below_inventory');
         }
         for (const key of ['impressions', 'profileViews', 'followersGained', 'reactions', 'comments', 'reposts', 'saves', 'sends']) {
             if (stats.values[key] !== null) row[key] = stats.values[key];
         }
 
-        const totalComments = row.comments ?? pub.comments ?? 0;
+        // Total inchangé depuis le dernier détail : les commentaires déjà comptés restent valables
+        if (!item.readComments) {
+            return row;
+        }
+
+        const totalComments = row.comments ?? item.inventoryComments ?? 0;
         if (totalComments === 0) {
-            row.commentsReaders = 0;
-            row.hasLinkFirstComment = false;
+            Object.assign(row, { commentsReaders: 0, commentsAuthor: 0, hasLinkFirstComment: false, detailComments: item.inventoryComments ?? 0 });
             return row;
         }
 
         const params = `count=100&start=0&q=comments&sortOrder=CHRONOLOGICAL&updateId=${encodeURIComponent(`activity:${activityId}`)}`;
         try {
-            const { result: commentsResult, entry: commentsEntry } = await this.linkedInRequest('comments', `/voyager/api/feed/comments?${params}`, 'json', pub.urn);
-            const comments = LinkXPParsers.parseComments(commentsResult.body, me, publishedMs);
+            const { result: commentsResult, entry: commentsEntry } = await this.linkedInRequest('comments', `/voyager/api/feed/comments?${params}`, 'json', item.urn);
+            const comments = LinkXPParsers.parseComments(commentsResult.body, me, item.publishedMs);
             if (comments.fetched === 0) commentsEntry.anomalies.push('comments_empty');
 
             // Total LinkedIn moins les commentaires de l'auteur trouvés : robuste si des réponses ne sont pas chargées
             row.commentsReaders = Math.max(0, totalComments - comments.authorComments);
+            row.commentsAuthor = comments.authorComments;
             row.hasLinkFirstComment = comments.hasLinkFirstComment;
+            // Référence pour la prochaine actualisation : le total de l'inventaire, auquel elle sera comparée
+            row.detailComments = item.inventoryComments ?? totalComments;
         } catch (error) {
-            if (error instanceof LinkedInBlockedError) throw error;
+            if (error instanceof LinkedInBlockedError || error instanceof DailyCapError) throw error;
         }
 
         return row;
+    }
+
+    // Lignes collectées en attente : envoyées avant toute nouvelle requête, conservées si l'API échoue
+    async flushPendingRows() {
+        if (!this.job.pendingRows.length) return;
+        await this.savePublications(this.job.pendingRows);
+        this.job.pendingRows = [];
+        await this.saveJob();
     }
 
     /**
@@ -635,18 +932,24 @@ class LinkXPCollector {
         return response;
     }
 
+    // Journal envoyé par lots ; ce qui n'a pas pu partir reste dans le passage persisté
     async flushLogs() {
         const version = chrome.runtime.getManifest().version;
-        for (let i = 0; i < this.logs.length; i += LINKXP_COLLECT.LOG_BATCH_SIZE) {
+        while (this.logs.length) {
+            const entries = this.logs.slice(0, LINKXP_COLLECT.LOG_BATCH_SIZE);
             try {
                 await this.api.apiRequest('POST', '/linkedin/collect-log', {
-                    run_id: this.runId,
+                    run_id: this.job.runId,
                     extension_version: version,
-                    entries: this.logs.slice(i, i + LINKXP_COLLECT.LOG_BATCH_SIZE),
+                    entries,
                 });
             } catch (error) {
                 console.error('Envoi du journal de collecte impossible:', error);
+                break;
             }
+            this.job.summary.anomalies += entries.filter(l => l.anomalies.length).length;
+            this.logs.splice(0, entries.length);
         }
+        await this.saveJob();
     }
 }

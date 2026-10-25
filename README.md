@@ -2,7 +2,7 @@
 
 Extension Chrome (Manifest V3) qui collecte les publications LinkedIn d'un utilisateur et leurs statistiques, puis les envoie à l'API [LinkXP](https://www.linkxp.net/) pour analyse.
 
-L'extension ne publie rien, ne modifie rien et n'interagit pas avec LinkedIn au nom de l'utilisateur. La collecte est déclenchée manuellement, s'exécute en arrière-plan avec un délai aléatoire entre chaque requête, et s'arrête immédiatement si LinkedIn signale un blocage.
+L'extension ne publie rien, ne modifie rien et n'interagit pas avec LinkedIn au nom de l'utilisateur. La collecte est déclenchée manuellement, s'exécute lentement en arrière-plan avec un délai aléatoire entre chaque requête et un plafond de requêtes par jour, et s'arrête immédiatement si LinkedIn signale un blocage.
 
 ---
 
@@ -34,10 +34,10 @@ L'extension ne publie rien, ne modifie rien et n'interagit pas avec LinkedIn au 
 
 **`collector.js`** — Chargé par `background.js` via `importScripts()`. Contient :
 - `LinkXPParsers` : fonctions pures de parsing (inventaire, statistiques, commentaires)
-- `LinkXPCollector` : orchestration d'un passage de collecte complet (profil → abonnés → inventaire → statistiques détaillées → envoi)
+- `LinkXPCollector` : orchestration d'un passage de collecte (profil → abonnés → inventaire → file de collecte détaillée traitée post par post), persisté pour reprendre après une interruption
 - `linkxpLinkedInRequest()` : fonction injectée dans un onglet LinkedIn via `chrome.scripting` pour exécuter les requêtes avec la session de l'utilisateur
 
-**`popup.js`** — Interface utilisateur. Trois actions : lier/délier le compte LinkXP, collecter les publications, collecter les compétences. Affiche la progression en temps réel via `chrome.storage.onChanged`.
+**`popup.js`** — Interface utilisateur. Actions : lier/délier le compte LinkXP, collecter les publications, mettre en pause / reprendre la collecte, collecter les compétences. Affiche la progression et la couverture (« statistiques détaillées pour X de vos Y posts ») en temps réel via `chrome.storage.onChanged`.
 
 ## Installation en développement
 
@@ -72,11 +72,17 @@ Les paramètres de collecte sont dans l'objet `LINKXP_COLLECT` en tête de `coll
 
 | Constante | Valeur | Description |
 |-----------|--------|-------------|
-| `DELAY_MIN_MS` / `DELAY_MAX_MS` | 3 000 – 5 000 | Délai aléatoire entre deux requêtes LinkedIn (ms) |
+| `INVENTORY_DELAY_MS` | 3 000 – 5 000 | Délai aléatoire entre deux requêtes de l'inventaire (ms) |
+| `DETAIL_DELAY_MS` | 8 000 – 15 000 | Délai aléatoire entre deux requêtes de la collecte détaillée (ms) |
+| `LONG_PAUSE_EVERY` / `LONG_PAUSE_MS` | 25 / 3 – 6 min | Pause longue toutes les 25 pages de statistiques |
+| `DAILY_REQUEST_CAP` | 300 | Requêtes LinkedIn par jour, tous passages confondus |
 | `INVENTORY_MAX_PAGES` | 10 | Pages d'inventaire max (× 50 = 500 publications) |
-| `MAX_DETAILED_POSTS` | 100 | Posts en collecte détaillée par passage |
-| `MATURITY_DAYS` | 7 | Jours avant qu'un post soit considéré mature |
-| `REFRESH_WINDOW_DAYS` | 90 | Fenêtre de rafraîchissement des statistiques |
+| `MATURITY_DAYS` | 7 | Aucun post n'est détaillé avant J+7 |
+| `DETAIL_WINDOW_DAYS` | 365 | Seuls les posts des 12 derniers mois sont détaillés |
+| `REFRESH_WINDOW_DAYS` | 90 | Âge maximal d'un post pour une actualisation automatique |
+| `REFRESH_MIN_GROWTH` / `REFRESH_MIN_INTERACTIONS` | 15 % / 5 | Hausse des interactions qui déclenche une actualisation |
+| `MAX_AUTO_REFRESHES` | 2 | Actualisations automatiques par post |
+| `MAX_DETAIL_FAILURES` | 3 | Échecs consécutifs avant de marquer un post indisponible |
 
 ## Fonctionnement
 
@@ -84,9 +90,13 @@ Les paramètres de collecte sont dans l'objet `LINKXP_COLLECT` en tête de `coll
 
 2. **Inventaire** — L'extension parcourt le flux de publications LinkedIn de l'utilisateur (via un onglet LinkedIn ouvert) et envoie la liste à l'API LinkXP par lots.
 
-3. **Statistiques détaillées** — Pour chaque publication originale éligible, l'extension récupère les statistiques (impressions, réactions, commentaires, etc.) et les commentaires, puis envoie les résultats à l'API.
+3. **File de collecte détaillée** — Seuls les posts qui en ont besoin y entrent : originaux publiés depuis 7 jours à 12 mois dont le détail est absent ou incomplet (visites de profil ou abonnés gagnés vides), les plus récents d'abord. Viennent en tête les demandes d'actualisation faites depuis l'app, en dernier les posts complets de moins de 90 jours dont les réactions + commentaires + reposts de l'inventaire ont augmenté d'au moins 15 % et de 5 depuis leur dernier détail (deux fois au plus). Un post complet qui n'a pas bougé n'est jamais recollecté.
 
-4. **Progression** — L'état de la collecte est partagé avec la popup via `chrome.storage.local`. La collecte continue même si la popup est fermée.
+4. **Statistiques détaillées** — Pour chaque post de la file : page de statistiques, puis commentaires (lus une fois, relus seulement si leur total a changé). Chaque post est envoyé à l'API dès qu'il est collecté. Un post en échec trois fois de suite est marqué indisponible et sort de la file.
+
+5. **Arrière-plan et reprise** — Le passage (file, avancement, lignes et journal pas encore envoyés) est persisté dans `chrome.storage.local.collectJob`. Les attentes longues sont découpées en tranches de 20 s pour que le service worker ne soit pas arrêté. Une collecte interrompue (service worker arrêté, Chrome fermé, veille) reprend seule après un délai ; au plafond du jour, elle reprend le lendemain (`chrome.alarms`). Jamais après un signal de blocage LinkedIn ni une pause demandée par l'utilisateur.
+
+6. **Progression** — L'état de la collecte est partagé avec la popup via `chrome.storage.local.collectState`. La collecte continue même si la popup est fermée.
 
 Le détail du protocole de collecte, du parsing et de la gestion des anomalies est documenté dans les commentaires de `collector.js`.
 

@@ -137,7 +137,8 @@ class BackgroundLinkXPAuth {
         }
     }
 
-    // Appel authentifié à l'API LinkXP (une nouvelle tentative après 60 s si la limite de débit est atteinte)
+    // Appel authentifié à l'API LinkXP (une nouvelle tentative après 60 s si la limite de débit est atteinte,
+    // attente découpée pour que le service worker ne soit pas arrêté entre-temps)
     async apiRequest(method, endpoint, body = null, retryOn429 = true) {
         const accessToken = await this.getValidAccessToken();
         const options = {
@@ -154,7 +155,7 @@ class BackgroundLinkXPAuth {
         const response = await fetch(this.getFullUrl(endpoint), options);
 
         if (response.status === 429 && retryOn429) {
-            await new Promise(resolve => setTimeout(resolve, 61000));
+            await linkxpSleep(61000);
             return this.apiRequest(method, endpoint, body, false);
         }
         if (!response.ok) {
@@ -323,8 +324,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     return;
 
                 case 'startCollection':
-                    // Répond tout de suite : la collecte dure plusieurs minutes et continue popup fermée
+                    // Répond tout de suite : la collecte dure longtemps et continue popup fermée
                     sendResponse({ success: true, data: { started: await startCollection() } });
+                    break;
+
+                case 'pauseCollection':
+                    sendResponse({ success: true, data: { paused: await pauseCollection() } });
+                    break;
+
+                case 'resumeCollection':
+                    sendResponse({ success: true, data: { started: await resumeCollection() } });
                     break;
 
                 case 'syncSkills':
@@ -357,7 +366,8 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
         return;
     }
 
-    // Écran de constats : version installée et liaison (le serveur vérifie que l'appareil est lié au membre connecté)
+    // Écran de constats : version installée, liaison (le serveur vérifie que l'appareil est lié au membre connecté)
+    // et état de la collecte, suivi en direct par la page
     if (message.type === 'LINKXP_PING') {
         (async () => {
             const linked = await backgroundAuth.isLinked();
@@ -367,6 +377,7 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
                     version: chrome.runtime.getManifest().version,
                     linked,
                     deviceId: linked ? await backgroundAuth.getDeviceId() : null,
+                    collect: linked ? await collectSummary() : null,
                 },
             });
         })();
@@ -376,7 +387,7 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     // Écran de constats : ouvre la popup et y met en évidence le bouton à utiliser (link, relink ou collect)
     if (message.type === 'LINKXP_OPEN_POPUP') {
         (async () => {
-            const target = ['link', 'relink', 'collect'].includes(message.target) ? message.target : 'link';
+            const target = ['link', 'relink', 'collect', 'resume'].includes(message.target) ? message.target : 'link';
             await chrome.storage.local.set({ popupFocus: { target, at: Date.now() } });
 
             let opened = false;
@@ -395,58 +406,181 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
 
 // ========================================
 // Collecte des publications (voir collector.js)
-// État partagé avec la popup via chrome.storage.local.collectState
+// Passage persisté dans chrome.storage.local.collectJob ; état affiché par la popup dans collectState
 // ========================================
 
-let collectionRunning = false;
-
-// Au démarrage du service worker, aucune collecte ne tourne : une collecte « en cours » a été interrompue
-chrome.storage.local.get('collectState').then(({ collectState }) => {
-    if (collectState?.running) {
-        setCollectState({ running: false, ok: false, finishedAt: Date.now(), message: 'Collecte interrompue, relancez-la.' });
-    }
-});
+const RESUME_ALARM = 'linkxp-collect-resume';
+let activeCollector = null;
 
 // Écritures sérialisées : une progression tardive ne peut pas écraser l'état final
 let collectStateQueue = Promise.resolve();
 
-function setCollectState(patch) {
+function setCollectState(patch, replace = false) {
     collectStateQueue = collectStateQueue.then(async () => {
         const { collectState } = await chrome.storage.local.get('collectState');
-        await chrome.storage.local.set({ collectState: { ...(collectState || {}), ...patch } });
+        await chrome.storage.local.set({ collectState: { ...(replace ? {} : collectState || {}), ...patch } });
     }).catch(error => console.error('Erreur état de collecte:', error));
     return collectStateQueue;
 }
 
+// Lendemain, peu après minuit : le plafond de requêtes est remis à zéro
+function nextDayResumeTime() {
+    const midnight = new Date();
+    midnight.setHours(24, 0, 0, 0);
+    return midnight.getTime() + linkxpRandomBetween([10 * 60 * 1000, 40 * 60 * 1000]);
+}
+
+async function scheduleResume(when) {
+    await chrome.alarms.create(RESUME_ALARM, { when });
+}
+
+// État de la collecte exposé à l'écran de constats (LINKXP_PING) : avancement, sans détail technique
+async function collectSummary() {
+    const { collectState } = await chrome.storage.local.get('collectState');
+    if (!collectState) {
+        return null;
+    }
+    return {
+        running: !!collectState.running,
+        status: collectState.status || null,
+        phase: collectState.phase || null,
+        message: collectState.running ? collectState.message || null : null,
+        coverage: collectState.coverage || null,
+        estimate: collectState.running ? collectState.estimate || null : null,
+    };
+}
+
+const COLLECT_END_MESSAGES = {
+    done: 'Collecte terminée',
+    paused: 'Collecte en pause',
+    daily_cap: 'Limite du jour atteinte : la collecte reprendra seule demain, laissez Chrome ouvert.',
+};
+
+function runCollector(collector) {
+    activeCollector = collector;
+    const progress = (state) => setCollectState({ ...state, running: true, status: 'running' });
+
+    collector.onProgress = progress;
+    progress({ phase: 'start', message: collector.job.phase === 'inventory' ? 'Démarrage de la collecte…' : 'Reprise de la collecte…', coverage: collector.job.coverage });
+
+    collector.run()
+        .then(async result => {
+            if (result.status === 'daily_cap') {
+                await scheduleResume(nextDayResumeTime());
+            }
+            await setCollectState({
+                running: false,
+                status: result.status,
+                finishedAt: Date.now(),
+                ok: result.status === 'done',
+                blocked: result.status === 'blocked',
+                error: result.error,
+                summary: result.summary,
+                coverage: result.coverage,
+                estimate: null,
+                message: COLLECT_END_MESSAGES[result.status] || result.error,
+            });
+        })
+        .catch(error => setCollectState({ running: false, status: 'error', finishedAt: Date.now(), ok: false, error: error.message, message: error.message }))
+        .finally(() => { activeCollector = null; });
+}
+
+// Nouveau passage : profil, inventaire, puis file de collecte détaillée reconstruite
 async function startCollection() {
-    if (collectionRunning) {
+    if (activeCollector) {
         return false;
     }
     // Rafraîchit le jeton si besoin, lève DEVICE_LINKING_REQUIRED sinon
     await backgroundAuth.getValidAccessToken();
+    await chrome.alarms.clear(RESUME_ALARM);
 
-    collectionRunning = true;
-    await chrome.storage.local.set({
-        collectState: { running: true, startedAt: Date.now(), phase: 'start', message: 'Démarrage de la collecte…' }
-    });
+    // Lignes et journal d'un passage précédent pas encore envoyés : repris par le nouveau passage
+    const previous = await LinkXPCollector.loadJob();
+    const collector = new LinkXPCollector(backgroundAuth, null);
+    collector.job.pendingRows = previous?.pendingRows || [];
+    collector.job.logs = previous?.logs || [];
+    collector.job.coverage = previous?.coverage || null;
 
-    const collector = new LinkXPCollector(backgroundAuth, (progress) => setCollectState(progress));
-
-    collector.run()
-        .then(result => setCollectState({
-            running: false,
-            finishedAt: Date.now(),
-            ok: result.ok,
-            blocked: !!result.blocked,
-            error: result.error || null,
-            summary: result.summary,
-            message: result.ok ? 'Collecte terminée' : result.error,
-        }))
-        .catch(error => setCollectState({ running: false, finishedAt: Date.now(), ok: false, error: error.message, message: error.message }))
-        .finally(() => { collectionRunning = false; });
-
+    await setCollectState({ running: true, status: 'running', startedAt: Date.now() }, true);
+    runCollector(collector);
     return true;
 }
+
+/**
+ * Reprend la file du passage persisté, sans refaire l'inventaire.
+ * Reprise automatique (auto = true) : collecte interrompue ou plafond du jour, jamais après un blocage
+ * LinkedIn ni une pause demandée par l'utilisateur.
+ */
+async function resumeCollection(auto = false) {
+    if (activeCollector) {
+        return false;
+    }
+    const job = await LinkXPCollector.loadJob();
+    const resumable = auto ? ['running', 'daily_cap'] : ['running', 'paused', 'daily_cap', 'error'];
+    if (!job || !resumable.includes(job.status)) {
+        return false;
+    }
+
+    try {
+        await backgroundAuth.getValidAccessToken();
+    } catch (error) {
+        await chrome.storage.local.set({ collectJob: { ...job, status: 'error', error: error.message } });
+        await setCollectState({ running: false, status: 'error', ok: false, error: error.message, message: 'Liaison requise : liez votre compte, puis reprenez la collecte.' });
+        throw error;
+    }
+    await chrome.alarms.clear(RESUME_ALARM);
+
+    runCollector(new LinkXPCollector(backgroundAuth, null, job));
+    return true;
+}
+
+async function pauseCollection() {
+    await chrome.alarms.clear(RESUME_ALARM);
+
+    if (activeCollector) {
+        activeCollector.requestStop();
+        await setCollectState({ message: 'Mise en pause après la publication en cours…' });
+        return true;
+    }
+
+    // Reprise programmée (interruption ou plafond du jour) : annulée
+    const job = await LinkXPCollector.loadJob();
+    if (job && ['running', 'daily_cap'].includes(job.status)) {
+        await chrome.storage.local.set({ collectJob: { ...job, status: 'paused' } });
+        await setCollectState({ running: false, status: 'paused', message: COLLECT_END_MESSAGES.paused });
+        return true;
+    }
+    return false;
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === RESUME_ALARM) {
+        resumeCollection(true).catch(error => console.error('Reprise de la collecte impossible:', error));
+    }
+});
+
+// Au démarrage du service worker (Chrome relancé, sortie de veille, arrêt pour inactivité) : une collecte
+// « en cours » a été interrompue et reprend seule après un délai ; au plafond du jour, elle reprend le lendemain
+(async () => {
+    const job = await LinkXPCollector.loadJob();
+    if (activeCollector) {
+        return;
+    }
+    if (job?.status === 'running') {
+        await scheduleResume(Date.now() + linkxpRandomBetween(LINKXP_COLLECT.RESUME_DELAY_MS));
+        await setCollectState({ running: true, status: 'running', message: 'Collecte interrompue : reprise automatique dans un instant…' });
+        return;
+    }
+    if (job?.status === 'daily_cap' && !(await chrome.alarms.get(RESUME_ALARM))) {
+        await scheduleResume(nextDayResumeTime());
+        return;
+    }
+    // État d'une version précédente sans passage persisté
+    const { collectState } = await chrome.storage.local.get('collectState');
+    if (collectState?.running && !job) {
+        await setCollectState({ running: false, ok: false, finishedAt: Date.now(), message: 'Collecte interrompue, relancez-la.' });
+    }
+})().catch(error => console.error('Erreur reprise de collecte:', error));
 
 // Gestion des erreurs globales
 self.addEventListener('error', (event) => {
